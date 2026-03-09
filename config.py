@@ -1,19 +1,31 @@
-"""Konfigurasi default video scraper"""
+"""
+Video Scraper Configuration
+==========================
+
+Categories:
+- LOGGING     : Log settings
+- BROWSER     : Browser/stealth settings  
+- SCRAPING    : Page scraping settings
+- DOWNLOAD    : Download settings
+- UPLOAD      : Streamtape upload settings
+- CONCURRENT  : Concurrency limits
+- FILES       : File management
+"""
+
 import logging
 
-# ── Log Level ──
-# DEBUG   = semua detail (development)
-# INFO    = info penting saja (production)
-# WARNING = hanya warning & error
-LOG_LEVEL = 'INFO'
 
-# ── Setup Logger ──
-# Format: [LEVEL] time | message
-logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL),
-    format='[%(levelname)s] %(message)s',
-)
-# Browser
+# ═══════════════════════════════════════════════════════════════════════════════
+# LOGGING
+# ═══════════════════════════════════════════════════════════════════════════════
+
+LOG_LEVEL = 'INFO'  # DEBUG | INFO | WARNING
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BROWSER
+# ═══════════════════════════════════════════════════════════════════════════════
+
 BROWSER_ARGS = [
     '--no-sandbox',
     '--disable-setuid-sandbox',
@@ -29,7 +41,6 @@ USER_AGENT = (
 
 VIEWPORT = {'width': 1920, 'height': 1080}
 
-# Anti-detection
 STEALTH_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
 Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
@@ -43,18 +54,16 @@ window.navigator.permissions.query = (parameters) => (
 );
 """
 
-# Scraping
-PAGE_TIMEOUT = 60000        # 60 detik
-PLAY_ATTEMPTS = 5           # Berapa kali coba klik play
-BUFFER_WAIT = 5             # Detik tunggu buffer
-WAIT_AFTER_CLICK = 3        # Detik tunggu setelah klik
 
-# Download
-FFMPEG_TIMEOUT = 600        # 10 menit
-DEFAULT_OUTPUT = 'video.mp4'
-DEFAULT_REFERER = 'https://fem.pemersatu.link/'
+# ═══════════════════════════════════════════════════════════════════════════════
+# SCRAPING
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# Play button selectors (urut prioritas)
+PAGE_TIMEOUT = 60000        # milliseconds
+PLAY_ATTEMPTS = 5           # Retry count for play button
+BUFFER_WAIT = 5             # Seconds to wait for buffer
+WAIT_AFTER_CLICK = 3       # Seconds after clicking play
+
 PLAY_SELECTORS = [
     '.plyr__control--overlaid',
     '[data-plyr="play"]',
@@ -63,7 +72,6 @@ PLAY_SELECTORS = [
     '#video_player',
 ]
 
-# Ad selectors yang akan dihapus
 AD_SELECTORS = [
     '[id*="ad"]', '[class*="ad-"]', '[class*="ads"]',
     '[id*="pop"]', '[class*="pop"]',
@@ -72,14 +80,45 @@ AD_SELECTORS = [
     'div[onclick]', '[class*="banner"]', '[id*="banner"]',
 ]
 
-STREAMTAPE_LOGIN = "03180fa90a4113de396a"      # ← Ganti
-STREAMTAPE_KEY = "RX032YQkbdSdvv4"      # ← Ganti
-CONCURRENT_UPLOAD = 3
-STREAMTAPE_FOLDER = "H2fH6LGMOMk"  # ← Tambah ini
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# DOWNLOAD
+# ═══════════════════════════════════════════════════════════════════════════════
+
+FFMPEG_TIMEOUT = 600        # seconds (10 minutes)
+DEFAULT_OUTPUT = 'video.mp4'
+DEFAULT_REFERER = 'https://fem.pemersatu.link/'
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# UPLOAD (Streamtape)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+STREAMTAPE_LOGIN = "03180fa90a4113de396a"
+STREAMTAPE_KEY = "RX032YQkbdSdvv4"
+STREAMTAPE_FOLDER = "H2fH6LGMOMk"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CONCURRENT
+# ═══════════════════════════════════════════════════════════════════════════════
 
 MAX_CONCURRENT_DOWNLOADS = 10
 MAX_CONCURRENT_UPLOADS = 2
 
-# ── File Management ──
-DELETE_AFTER_UPLOAD = True  # Hapus file video setelah upload sukses
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+DELETE_AFTER_UPLOAD = True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SETUP LOGGER (run once)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format='[%(levelname)s] %(message)s',
+)
