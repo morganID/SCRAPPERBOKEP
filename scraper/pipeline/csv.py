@@ -94,7 +94,6 @@ class CSVPipeline:
         print(f"📄 CSV: {self.csv_file}")
         print(f"   Columns: {fieldnames}")
         print(f"   Rows: {len(rows)}")
-        logger.debug(f"CSV fieldnames: {fieldnames}")
         
         # Detect URL column
         detected = detect_url_column(fieldnames, preferred=self.url_column)
