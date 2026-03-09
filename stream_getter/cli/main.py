@@ -8,10 +8,10 @@ import os
 import sys
 
 import config
-from scraper.pipeline import download_direct, download_video
+from stream_getter.pipeline import download_direct, download_video
 from stream_getter.pipeline import upload_multiple, upload_to_streamtape
 from .parser import create_parser
-from ..core.scraper import VideoScraper
+from ..core.stream_getter import VideoScraper
 from ..core.interceptor import NetworkInterceptor
 from ..pipeline.batch import BatchPipeline
 from ..pipeline.csv import CSVPipeline
@@ -195,3 +195,8 @@ def run_cli() -> None:
     # Handle debug
     elif args.debug:
         loop.run_until_complete(debug_page(args.debug))
+    
+    # Handle scout
+    elif args.scout:
+        from .scout import run_scout
+        loop.run_until_complete(run_scout(args.scout))

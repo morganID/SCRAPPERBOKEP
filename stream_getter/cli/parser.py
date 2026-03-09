@@ -43,6 +43,10 @@ def create_parser() -> argparse.ArgumentParser:
         '--debug',
         help='Debug a page and capture info'
     )
+    group.add_argument(
+        '--scout',
+        help='Analyze website and generate adapter code'
+    )
     
     # Optional arguments
     parser.add_argument(
