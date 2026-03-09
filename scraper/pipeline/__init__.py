@@ -4,7 +4,7 @@ Scraper Pipeline - Processing pipelines for batch and CSV operations.
 
 from .batch import BatchPipeline
 from .csv import CSVPipeline
-from .downloader import VideoDownloader, download_video, pick_best_url
+from .downloader import VideoDownloader, download_video, download_direct, pick_best_url
 from .uploader import StreamtapeUploader, upload_to_streamtape
 from .csv_helper import (
     read_csv,
