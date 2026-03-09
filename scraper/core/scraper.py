@@ -72,7 +72,7 @@ class VideoScraper:
         Returns:
             List of M3U8 URLs found on the page.
         """
-        print(f"\n🎬 Scraping: {url}")
+        # print(f"\n🎬 Scraping: {url}")
         
         # Step 1: Navigate to the page
         logger.debug("Opening page...")

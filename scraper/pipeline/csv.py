@@ -165,8 +165,8 @@ class CSVPipeline:
                         os.path.join(self.output_dir, f"{sanitize_filename(row['title'])}.mp4")
                     )
                     
-                    print(f"📝 Title: {row['title']}")
-                    print(f"🏆 Best: {best}")
+                    # print(f"📝 Title: {row['title']}")
+                    # print(f"🏆 Best: {best}")
                     logger.debug(f"[{seq}] M3U8: {best}")
                     logger.debug(f"[{seq}] Output: {output}")
                     

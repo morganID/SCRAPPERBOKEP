@@ -96,8 +96,8 @@ class BatchPipeline:
                     title = sanitize_filename(title) or f"video_{i}"
                     output = unique_output(os.path.join(self.output_dir, f"{title}.mp4"))
                     
-                    print(f"📝 Title: {title}")
-                    print(f"🏆 Best: {best}")
+                    # print(f"📝 Title: {title}")
+                    # print(f"🏆 Best: {best}")
                     logger.debug(f"[{i}/{total}] Output: {output}")
                     
                     job = {

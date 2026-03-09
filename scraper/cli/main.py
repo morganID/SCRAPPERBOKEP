@@ -49,7 +49,7 @@ async def scrape_single(url: str, output: str = None, referer: str = None, uploa
         if m3u8_urls:
             best = NetworkInterceptor.pick_best_url(m3u8_urls)
             logger.debug(f"All M3U8: {m3u8_urls}")
-            print(f"\n🏆 Best URL: {best}")
+            # print(f"\n🏆 Best URL: {best}")
             
             if output:
                 output_file = output
@@ -57,7 +57,7 @@ async def scrape_single(url: str, output: str = None, referer: str = None, uploa
                 title = await scraper.get_page_title()
                 title = sanitize_filename(title)
                 output_file = f"{title}.mp4"
-                print(f"📝 Title: {title}")
+                # print(f"📝 Title: {title}")
             
             logger.debug(f"Output: {output_file}")
             success = download_video(
