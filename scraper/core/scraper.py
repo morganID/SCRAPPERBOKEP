@@ -223,13 +223,19 @@ class VideoScraper:
         try:
             title = await self.page.evaluate("""
                 () => {
-                    // Try h1
+                    // Try h1 - get only first line
                     const h1 = document.querySelector('h1');
-                    if (h1 && h1.innerText.trim()) return h1.innerText.trim();
+                    if (h1 && h1.innerText.trim()) {
+                        const lines = h1.innerText.trim().split(/\n/);
+                        return lines[0].trim();
+                    }
 
                     // Try video title class
                     const vt = document.querySelector('.video-title, .entry-title, .title');
-                    if (vt && vt.innerText.trim()) return vt.innerText.trim();
+                    if (vt && vt.innerText.trim()) {
+                        const lines = vt.innerText.trim().split(/\n/);
+                        return lines[0].trim();
+                    }
 
                     // Try Open Graph title
                     const og = document.querySelector('meta[property="og:title"]');

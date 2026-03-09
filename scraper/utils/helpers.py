@@ -21,12 +21,24 @@ def sanitize_filename(name: Optional[str]) -> str:
     if not name:
         return "video"
     
-    # Remove invalid characters for filenames
-    name = re.sub(r'[<>:"/\\|?*\n\r\t]', '', name)
-    # Replace multiple spaces with single space
+    # Remove newlines and extra whitespace
+    name = name.replace('\n', ' ').replace('\r', ' ')
+    
+    # Remove duration pattern like "03:13" at start
+    name = re.sub(r'^\d{1,2}:\d{2}\s*', '', name)
+    
+    # Remove patterns like "114K 84%" (views/ratings)
+    name = re.sub(r'\d+[KMG]?\s*\d+%?', '', name)
+    
+    # Remove multiple spaces
     name = re.sub(r'\s+', ' ', name).strip()
+    
+    # Remove invalid characters for filenames
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
+    
     # Remove leading/trailing dots
     name = name.strip('.')
+    
     # Truncate to reasonable length
     name = name[:100]
     
