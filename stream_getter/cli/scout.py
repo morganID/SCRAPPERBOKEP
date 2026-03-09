@@ -60,21 +60,21 @@ VIDEO_EMBED_KEYWORDS = (
 
 # (selector, type, confidence)
 TITLE_CANDIDATES = [
-    ("meta[property='og:title']",  "meta", 10),
-    ("h1",                         "text",  9),
-    (".video-title",               "text",  8),
-    (".entry-title",               "text",  7),
-    ("meta[name='title']",         "meta",  6),
-    ("h2",                         "text",  5),
-    (".title",                     "text",  4),
-    ("[class*='title']",           "text",  3),
+    ("meta[property='og:title']", "meta", 10),
+    ("h1",                        "text",  9),
+    (".video-title",              "text",  8),
+    (".entry-title",              "text",  7),
+    ("meta[name='title']",        "meta",  6),
+    ("h2",                        "text",  5),
+    (".title",                    "text",  4),
+    ("[class*='title']",          "text",  3),
 ]
 
 # (selector, confidence)
 PLAY_CANDIDATES = [
     (".jw-icon-playback",    10),
     (".vjs-big-play-button", 10),
-    (".plyr__control--play", 9),
+    (".plyr__control--play",  9),
     ("button.play",           8),
     ("#playbutton",           8),
     (".play-button",          7),
@@ -110,7 +110,15 @@ AD_CANDIDATES = {
     ],
 }
 
-NAVIGATION_STRATEGIES = ("domcontentloaded", "load", "commit")
+# (wait_until, timeout_ms) — dari cepat ke lambat
+NAVIGATION_STRATEGIES = [
+    ("commit",             15_000),
+    ("domcontentloaded",   20_000),
+    ("load",               30_000),
+]
+
+STREAM_WAIT_TIMEOUT = 15
+STREAM_POLL_INTERVAL = 1
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -166,8 +174,6 @@ class AnalysisResult:
     streams: List[CapturedStream] = field(default_factory=list)
     total_requests: int = 0
     error: Optional[str] = None
-
-    # ── Convenience properties ──
 
     @property
     def best_title_selector(self) -> Optional[str]:
@@ -262,7 +268,9 @@ class AdapterScout:
             await self._playwright.stop()
             self._playwright = None
 
-    # ── Network Interception ──
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Network Interception
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _on_request(self, request: Request) -> None:
         self._request_count += 1
@@ -287,7 +295,6 @@ class AdapterScout:
                 stream_type=self._classify_stream(url, content_type),
             )
 
-            # Peek inside m3u8 to detect master vs media playlist
             if ".m3u8" in url.lower():
                 try:
                     body = await response.text()
@@ -297,7 +304,10 @@ class AdapterScout:
                     pass
 
             self._streams.append(stream)
-            logger.info("Stream captured: [%s] %s", stream.stream_type, url[:80])
+            logger.info(
+                "Stream captured: [%s] %s",
+                stream.stream_type, url[:80],
+            )
 
         except Exception as exc:
             logger.debug("Response handler error: %s", exc)
@@ -332,6 +342,101 @@ class AdapterScout:
             return "WEBM"
         return "UNKNOWN"
 
+    @property
+    def _has_usable_streams(self) -> bool:
+        """True jika sudah punya stream HLS/DASH/MP4."""
+        return any(
+            s.stream_type in ("HLS", "DASH", "MP4")
+            for s in self._streams
+        )
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Navigation
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def _navigate(self, url: str) -> bool:
+        """
+        Navigate with escalating strategies.
+        If streams are already captured mid-loading, skip waiting.
+        """
+        for strategy, timeout in NAVIGATION_STRATEGIES:
+            try:
+                logger.info(
+                    "Navigating (%s, %dms)...", strategy, timeout,
+                )
+                await self._page.goto(
+                    url, wait_until=strategy, timeout=timeout,
+                )
+                logger.info("Loaded with strategy=%s", strategy)
+                return True
+
+            except Exception as exc:
+                logger.warning(
+                    "Navigation (%s) failed: %s", strategy, exc,
+                )
+                # Streams sudah tertangkap saat loading → lanjut
+                if self._has_usable_streams:
+                    logger.info(
+                        "Navigation timed out BUT %d streams already "
+                        "captured — continuing",
+                        len(self._streams),
+                    )
+                    return True
+
+        # Semua strategy gagal — cek apakah page punya content
+        try:
+            title = await self._page.title()
+            if title:
+                logger.info(
+                    "All strategies failed but page has title: %s",
+                    title[:50],
+                )
+                return True
+        except Exception:
+            pass
+
+        return False
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Stream Waiting
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def _wait_for_streams(
+        self,
+        timeout: int = STREAM_WAIT_TIMEOUT,
+        min_streams: int = 1,
+    ) -> bool:
+        """
+        Poll sampai punya minimal `min_streams` usable streams,
+        atau sampai timeout.
+        """
+        logger.info(
+            "Waiting up to %ds for streams (need %d)...",
+            timeout, min_streams,
+        )
+
+        usable_count = 0
+        for elapsed in range(timeout):
+            usable = [
+                s for s in self._streams
+                if s.stream_type in ("HLS", "DASH", "MP4")
+            ]
+            usable_count = len(usable)
+
+            if usable_count >= min_streams:
+                logger.info(
+                    "Got %d usable stream(s) after %ds",
+                    usable_count, elapsed,
+                )
+                return True
+
+            await asyncio.sleep(STREAM_POLL_INTERVAL)
+
+        logger.info(
+            "Stream wait finished: %d usable stream(s)", usable_count,
+        )
+        return usable_count > 0
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  Main Analysis Pipeline
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -339,24 +444,30 @@ class AdapterScout:
     async def analyze(self, url: str) -> AnalysisResult:
         """
         Full analysis pipeline:
-        1. Navigate
-        2. Detect selectors (title, play, ads)
-        3. Dismiss ads
+        1. Navigate (early exit jika streams sudah tertangkap)
+        2. Discover selectors (title, play, ads)
+        3. Dismiss ads/popups
         4. Click play → trigger stream loading
-        5. Collect video elements & captured streams
+        5. Wait for streams (smart polling)
+        6. Collect video elements & captured streams
         """
         self._reset()
 
-        result = AnalysisResult(url=url, domain=urlparse(url).netloc)
+        result = AnalysisResult(
+            url=url,
+            domain=urlparse(url).netloc,
+        )
 
         # Step 1 — Navigate
         logger.info("Analyzing: %s", url)
         if not await self._navigate(url):
             result.error = "Failed to load page"
+            result.streams = list(self._streams)
+            result.total_requests = self._request_count
             return result
 
         await asyncio.sleep(2)
-        result.page_title = await self._page.title()
+        result.page_title = await self._safe_title()
 
         # Step 2 — Discover selectors
         result.titles = await self._find_titles()
@@ -367,12 +478,18 @@ class AdapterScout:
         await self._dismiss_ads(result.ads)
         await asyncio.sleep(1)
 
-        # Step 4 — Click play to trigger streams
-        clicked = await self._try_play(result.play_buttons)
-        if clicked:
-            await asyncio.sleep(5)  # let the player buffer
+        # Step 4 — Click play (skip jika stream sudah ada)
+        if not self._has_usable_streams:
+            clicked = await self._try_play(result.play_buttons)
+            if clicked:
+                await self._wait_for_streams(timeout=10)
+            else:
+                await self._wait_for_streams(timeout=5)
         else:
-            await asyncio.sleep(2)
+            logger.info(
+                "Skipping play — %d stream(s) already captured",
+                len(self._streams),
+            )
 
         # Step 5 — Collect results
         result.videos = await self._find_videos()
@@ -387,18 +504,12 @@ class AdapterScout:
         self._seen_urls.clear()
         self._request_count = 0
 
-    async def _navigate(self, url: str) -> bool:
-        """Try multiple wait strategies until one succeeds."""
-        for strategy in NAVIGATION_STRATEGIES:
-            try:
-                await self._page.goto(
-                    url, wait_until=strategy, timeout=60_000,
-                )
-                logger.info("Loaded with strategy=%s", strategy)
-                return True
-            except Exception as exc:
-                logger.warning("Navigation (%s) failed: %s", strategy, exc)
-        return False
+    async def _safe_title(self) -> str:
+        """Get page title without throwing."""
+        try:
+            return await self._page.title() or ""
+        except Exception:
+            return ""
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  Selector Finders
@@ -517,7 +628,10 @@ class AdapterScout:
 
                 is_embed = bool(
                     src
-                    and any(kw in src.lower() for kw in VIDEO_EMBED_KEYWORDS)
+                    and any(
+                        kw in src.lower()
+                        for kw in VIDEO_EMBED_KEYWORDS
+                    )
                 )
 
                 results.append(VideoElement(
@@ -528,7 +642,7 @@ class AdapterScout:
                     dimensions=f"{width}x{height}" if width else None,
                 ))
 
-                # Dive inside iframe when it looks like a video embed
+                # Dive inside iframe
                 if is_embed:
                     results.extend(
                         await self._probe_iframe(iframe, src or "")
@@ -568,7 +682,9 @@ class AdapterScout:
         for ad in ads:
             try:
                 if ad.category == "close_button" and ad.visible > 0:
-                    await self._page.click(ad.selector, timeout=2_000)
+                    await self._page.click(
+                        ad.selector, timeout=2_000,
+                    )
                     await self._page.wait_for_timeout(500)
                 elif ad.category == "popup" and ad.visible > 0:
                     await self._page.evaluate(
@@ -579,13 +695,17 @@ class AdapterScout:
             except Exception:
                 continue
 
-    async def _try_play(self, buttons: List[SelectorMatch]) -> bool:
-        """Click the best visible play button. Returns True on success."""
+    async def _try_play(
+        self, buttons: List[SelectorMatch],
+    ) -> bool:
+        """Click the best visible play button."""
         for btn in buttons[:3]:
             if not btn.visible:
                 continue
             try:
-                await self._page.click(btn.selector, timeout=3_000)
+                await self._page.click(
+                    btn.selector, timeout=3_000,
+                )
                 logger.info("Clicked play: %s", btn.selector)
                 return True
             except Exception:
@@ -597,11 +717,12 @@ class AdapterScout:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     async def _count_visible(self, selector: str) -> int:
-        """Count elements matching *selector* that are actually visible."""
+        """Count elements matching selector that are visible."""
         try:
             return await self._page.evaluate(
                 """(sel) => Array.from(document.querySelectorAll(sel))
-                            .filter(e => e.offsetParent !== null).length""",
+                            .filter(e => e.offsetParent !== null)
+                            .length""",
                 selector,
             )
         except Exception:
@@ -621,9 +742,7 @@ class AdapterScout:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def generate_adapter_code(result: AnalysisResult) -> str:
-    """
-    Produce a ready-to-save Python adapter file from an AnalysisResult.
-    """
+    """Produce a ready-to-save Python adapter file."""
     domain = result.domain.replace("www.", "")
     domain_snake = re.sub(r"[^a-zA-Z0-9]", "_", domain)
     class_name = (
@@ -637,8 +756,8 @@ def generate_adapter_code(result: AnalysisResult) -> str:
     popup_sels = result.popup_selectors[:3]
     is_meta = best_title.startswith("meta")
 
-    L: List[str] = []          # accumulator
-    a = L.append               # shorthand
+    L: List[str] = []
+    a = L.append
 
     # ── Header ──
     a('"""')
@@ -701,7 +820,7 @@ def generate_adapter_code(result: AnalysisResult) -> str:
     a("    # ── helpers ──")
     a("")
     a("    async def _safe_click(self, selector: str) -> bool:")
-    a('        """Click element if it exists and is visible."""')
+    a('        """Click element if visible."""')
     a("        try:")
     a("            el = await self.page.query_selector(selector)")
     a("            if el and await el.is_visible():")
@@ -712,7 +831,7 @@ def generate_adapter_code(result: AnalysisResult) -> str:
     a("        return False")
     a("")
     a("    async def _safe_remove(self, selector: str) -> None:")
-    a('        """Remove matching elements from the DOM."""')
+    a('        """Remove matching elements from DOM."""')
     a("        try:")
     a("            await self.page.evaluate(")
     a('                "(sel) => document.querySelectorAll(sel)"')
@@ -750,6 +869,12 @@ def print_report(result: AnalysisResult) -> None:
 
     if result.error:
         print(f"\n   ❌ Error: {result.error}")
+        # Tetap tampilkan streams yang tertangkap
+        if result.streams:
+            print(f"\n   ⚠️  But {len(result.streams)} streams were "
+                  "captured before error:")
+            for s in result.streams:
+                print(f"      [{s.stream_type}] {s.url[:80]}")
         return
 
     # Titles
@@ -773,10 +898,10 @@ def print_report(result: AnalysisResult) -> None:
 
     # Ads
     print(f"\n🚫 Ad / popup elements ({len(result.ads)}):")
-    for a in result.ads[:6]:
-        icon = _CATEGORY_ICONS.get(a.category, "❓")
-        print(f"   {icon} {a.selector}: "
-              f"{a.count} total, {a.visible} visible")
+    for ad in result.ads[:6]:
+        icon = _CATEGORY_ICONS.get(ad.category, "❓")
+        print(f"   {icon} {ad.selector}: "
+              f"{ad.count} total, {ad.visible} visible")
 
     # Streams
     print(f"\n🎯 Captured streams ({len(result.streams)}):")
@@ -794,9 +919,10 @@ def print_report(result: AnalysisResult) -> None:
 #  CLI Entry Point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-async def run_scout(url: str) -> AnalysisResult:
-    """Analyze a URL, print a report, and generate adapter code."""
-
+async def run_scout(url: str, save: bool = True) -> AnalysisResult:
+    """Analyze a URL, print report, and generate adapter code."""
+    import os
+    
     print(f"\n{'=' * 55}")
     print("🎯  ADAPTER SCOUT — Auto-Generate Domain Adapter")
     print(f"{'=' * 55}")
@@ -806,18 +932,30 @@ async def run_scout(url: str) -> AnalysisResult:
 
     print_report(result)
 
-    if result.error:
+    if result.error and not result.streams:
         return result
 
     code = generate_adapter_code(result)
-    domain_file = re.sub(r"[^a-zA-Z0-9]", "_", result.domain.replace("www.", ""))
+    domain_file = re.sub(
+        r"[^a-zA-Z0-9]", "_",
+        result.domain.replace("www.", ""),
+    )
 
     print(f"{'=' * 55}")
     print("📄  Generated Adapter Code:")
     print(f"{'=' * 55}\n")
     print(code)
-    print(f"\n{'=' * 55}")
-    print(f"💾  Save as: stream_getter/adapters/domains/{domain_file}.py")
-    print(f"{'=' * 55}\n")
+    
+    # Auto-save to file
+    if save:
+        output_path = f"stream_getter/adapters/domains/{domain_file}.py"
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, 'w') as f:
+            f.write(code)
+        print(f"\n✅ Saved to: {output_path}")
+    else:
+        print(f"\n{'=' * 55}")
+        print(f"💾  Save as: stream_getter/adapters/domains/{domain_file}.py")
+        print(f"{'=' * 55}\n")
 
     return result
