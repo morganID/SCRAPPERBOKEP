@@ -5,16 +5,16 @@ Usage:
     from stream_getter.adapters import AdapterRegistry, BaseAdapter
     
     # Adapters are auto-registered when imported
-    # Create custom adapter in adapters/custom.py
+    # Create custom adapter in adapters/domains/your_site.py
 """
 
 from urllib.parse import urlparse
 from typing import Optional, List, Dict, Any
 from abc import ABC, abstractmethod
 
-# Import example adapters to register them (auto-load)
+# Auto-load domain adapters
 try:
-    from . import example_adapters
+    from . import domains
 except ImportError:
     pass
 
