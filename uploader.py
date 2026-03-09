@@ -51,32 +51,79 @@ async def upload_to_streamtape(file_path):
                 form.add_field('file1', f, filename=filename, content_type='video/mp4')
 
                 async with session.post(upload_url, data=form) as resp:
-                    result = await resp.json()
-
-                    if result.get('status') == 200:
-                        url = result['result']['url']
-                        print(f"   ✅ Uploaded: {url}")
-                        return url
+                    # Response bisa JSON atau text/HTML
+                    content_type = resp.headers.get('Content-Type', '')
+                    
+                    if 'application/json' in content_type:
+                        result = await resp.json()
+                        if result.get('status') == 200:
+                            url = result['result']['url']
+                            print(f"   ✅ Uploaded: {url}")
+                            return url
+                        else:
+                            print(f"   ❌ Upload failed: {result.get('msg')}")
+                            return None
                     else:
-                        print(f"   ❌ Upload failed: {result.get('msg')}")
-                        return None
+                        # Response bukan JSON, coba parse dari text
+                        text = await resp.text()
+                        
+                        # Cek apakah ada URL di response
+                        if 'streamtape.com' in text:
+                            # Extract URL dari response
+                            import re
+                            match = re.search(r'https?://streamtape\.com/v/[a-zA-Z0-9]+', text)
+                            if match:
+                                url = match.group(0)
+                                print(f"   ✅ Uploaded: {url}")
+                                return url
+                        
+                        # Cek status code
+                        if resp.status == 200:
+                            # Upload kemungkinan sukses, cek file list
+                            print(f"   ⏳ Upload selesai, checking file list...")
+                            return await check_uploaded_file(session, filename)
+                        else:
+                            print(f"   ❌ Upload failed: HTTP {resp.status}")
+                            print(f"   Response: {text[:200]}")
+                            return None
 
         except Exception as e:
             print(f"   ❌ Error: {e}")
             return None
 
 
+async def check_uploaded_file(session, filename):
+    """Cek file yang baru diupload dari file list API"""
+    try:
+        api_url = (
+            f"https://api.streamtape.com/file/listfolder"
+            f"?login={config.STREAMTAPE_LOGIN}"
+            f"&key={config.STREAMTAPE_KEY}"
+        )
+        
+        async with session.get(api_url) as resp:
+            data = await resp.json()
+            if data.get('status') == 200:
+                files = data.get('result', {}).get('files', [])
+                
+                # Cari file dengan nama yang cocok (terbaru)
+                for f in reversed(files):
+                    if filename.lower() in f.get('name', '').lower():
+                        file_id = f.get('linkid')
+                        url = f"https://streamtape.com/v/{file_id}"
+                        print(f"   ✅ Found: {url}")
+                        return url
+                        
+        print(f"   ⚠️ File uploaded tapi URL tidak ditemukan")
+        return None
+        
+    except Exception as e:
+        print(f"   ⚠️ Error checking file: {e}")
+        return None
+
+
 async def upload_multiple(file_paths, concurrent=3):
-    """
-    Upload banyak file sekaligus
-    
-    Args:
-        file_paths: List path file
-        concurrent: Jumlah upload bersamaan
-    
-    Returns:
-        List of dict hasil upload
-    """
+    """Upload banyak file sekaligus"""
     semaphore = asyncio.Semaphore(concurrent)
 
     async def upload_with_semaphore(fp):
