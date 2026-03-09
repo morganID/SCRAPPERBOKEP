@@ -22,6 +22,7 @@ __all__ = [
     # Downloader
     "VideoDownloader",
     "download_video",
+    "download_direct",
     "pick_best_url",
     # Uploader
     "StreamtapeUploader",

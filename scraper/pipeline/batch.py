@@ -8,8 +8,8 @@ import os
 from typing import List, Dict, Any, Optional
 
 import config
-from downloader import download_video, pick_best_url
-from uploader import upload_to_streamtape
+from .downloader import download_video, pick_best_url
+from .uploader import upload_to_streamtape
 from ..core.scraper import VideoScraper
 from ..core.interceptor import NetworkInterceptor
 from ..utils.helpers import sanitize_filename, unique_output
@@ -152,7 +152,7 @@ class BatchPipeline:
         """
         async with sem_dl:
             logger.info(f"Downloading: {job['title'][:40]}")
-            log.debug(f"M3U8: {job['m3u8']}")
+            logger.debug(f"M3U8: {job['m3u8']}")
             
             success = await asyncio.to_thread(
                 download_video,
