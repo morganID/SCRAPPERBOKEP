@@ -5,12 +5,12 @@ Video Scraper - Main Entry Point
 Usage:
   python main.py --url "https://target-site.com/video"
   python main.py --url "URL" --output video.mp4
-  python main.py --url "URL" --upload                    # ← NEW
+  python main.py --url "URL" --upload
   python main.py --direct "https://xxx/index.m3u8"
   python main.py --batch urls.txt
-  python main.py --batch urls.txt --upload               # ← NEW
-  python main.py --upload video.mp4                      # ← NEW
-  python main.py --upload ./videos                       # ← NEW
+  python main.py --batch urls.txt --upload
+  python main.py --upload-only video.mp4
+  python main.py --upload-only ./videos
   python main.py --debug "https://target-site.com/video"
 """
 
@@ -19,6 +19,7 @@ import argparse
 import json
 import sys
 import os
+import re
 from pathlib import Path
 
 try:
@@ -29,8 +30,56 @@ except ImportError:
 
 from scraper import VideoScraper
 from downloader import download_video, download_direct, pick_best_url
-from uploader import upload_to_streamtape, upload_multiple  # ← NEW
+from uploader import upload_to_streamtape, upload_multiple
 import config
+
+
+# ========================
+#  HELPER
+# ========================
+
+def sanitize_filename(name):
+    """Bersihkan nama file dari karakter ilegal"""
+    if not name:
+        return "video"
+    # Hapus karakter ilegal
+    name = re.sub(r'[<>:"/\\|?*\n\r\t]', '', name)
+    # Ganti spasi berlebih
+    name = re.sub(r'\s+', ' ', name).strip()
+    # Hapus titik di awal/akhir
+    name = name.strip('.')
+    # Batasi panjang
+    name = name[:100]
+    return name if name else "video"
+
+
+async def get_page_title(page):
+    """Ambil judul dari halaman"""
+    try:
+        title = await page.evaluate("""
+            () => {
+                // Coba h1
+                const h1 = document.querySelector('h1');
+                if (h1 && h1.innerText.trim()) return h1.innerText.trim();
+                
+                // Coba .video-title atau .entry-title
+                const vt = document.querySelector('.video-title, .entry-title, .title');
+                if (vt && vt.innerText.trim()) return vt.innerText.trim();
+                
+                // Coba og:title
+                const og = document.querySelector('meta[property="og:title"]');
+                if (og && og.content) return og.content.trim();
+                
+                // Coba title tag (hapus suffix website)
+                const title = document.title;
+                if (title) return title.split(/[-|–—]/)[0].trim();
+                
+                return null;
+            }
+        """)
+        return title
+    except:
+        return None
 
 
 # ========================
@@ -40,7 +89,6 @@ import config
 async def scrape_single(url, output=None, referer=None, upload=False):
     """Scrape dan download satu video"""
     scraper = VideoScraper()
-    output_file = output or config.DEFAULT_OUTPUT
 
     try:
         await scraper.start_browser()
@@ -49,6 +97,15 @@ async def scrape_single(url, output=None, referer=None, upload=False):
         if m3u8_urls:
             best = pick_best_url(m3u8_urls)
             print(f"\n🏆 Best URL: {best}")
+
+            # Ambil judul untuk nama file
+            if output:
+                output_file = output
+            else:
+                title = await get_page_title(scraper.page)
+                title = sanitize_filename(title)
+                output_file = f"{title}.mp4"
+                print(f"📝 Judul: {title}")
 
             success = download_video(
                 m3u8_url=best,
@@ -89,6 +146,7 @@ async def scrape_batch(urls, output_dir='.', referer=None, upload=False):
 
             print(f"\n\n{'#'*60}")
             print(f"# VIDEO {i+1}/{len(urls)}")
+            print(f"# {url}")
             print(f"{'#'*60}")
 
             scraper.reset()
@@ -98,7 +156,18 @@ async def scrape_batch(urls, output_dir='.', referer=None, upload=False):
 
                 if m3u8_urls:
                     best = pick_best_url(m3u8_urls)
-                    output = os.path.join(output_dir, f'video_{i+1}.mp4')
+
+                    # Ambil judul untuk nama file
+                    title = await get_page_title(scraper.page)
+                    title = sanitize_filename(title) or f"video_{i+1}"
+                    print(f"📝 Judul: {title}")
+
+                    # Cek duplikat nama file
+                    output = os.path.join(output_dir, f"{title}.mp4")
+                    counter = 1
+                    while os.path.exists(output):
+                        output = os.path.join(output_dir, f"{title}_{counter}.mp4")
+                        counter += 1
 
                     success = download_video(
                         m3u8_url=best,
@@ -111,15 +180,26 @@ async def scrape_batch(urls, output_dir='.', referer=None, upload=False):
 
                     results.append({
                         'url': url,
+                        'title': title,
                         'status': 'OK' if success else 'DOWNLOAD_FAILED',
                         'm3u8': best,
                         'file': output if success else None,
                     })
                 else:
-                    results.append({'url': url, 'status': 'NO_M3U8', 'file': None})
+                    results.append({
+                        'url': url,
+                        'title': '',
+                        'status': 'NO_M3U8',
+                        'file': None
+                    })
 
             except Exception as e:
-                results.append({'url': url, 'status': f'ERROR: {e}', 'file': None})
+                results.append({
+                    'url': url,
+                    'title': '',
+                    'status': f'ERROR: {e}',
+                    'file': None
+                })
 
             await asyncio.sleep(3)
 
@@ -148,8 +228,10 @@ async def scrape_batch(urls, output_dir='.', referer=None, upload=False):
     print(f"{'='*60}")
     for r in results:
         icon = "✅" if r['status'] == 'OK' else "❌"
+        title = r.get('title', 'Unknown')[:40] or r['url'][:40]
         st_url = r.get('streamtape', '')
-        print(f"  {icon} {r['status']:20s} → {r['url'][:40]}")
+        print(f"  {icon} {title}")
+        print(f"     Status: {r['status']}")
         if st_url:
             print(f"     📺 {st_url}")
 
@@ -221,6 +303,31 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Video Scraper - Intercept & Download HLS streams',
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Scrape & download (nama file = judul video)
+  python main.py --url "https://site.com/video"
+  
+  # Scrape & download dengan nama custom
+  python main.py --url "https://site.com/video" --output custom.mp4
+
+  # Scrape, download & upload ke Streamtape
+  python main.py --url "https://site.com/video" --upload
+
+  # Direct download M3U8
+  python main.py --direct "https://xxx/index.m3u8"
+
+  # Batch scrape (nama file = judul masing-masing)
+  python main.py --batch urls.txt --output-dir ./videos
+  python main.py --batch urls.txt --output-dir ./videos --upload
+
+  # Upload saja (file sudah ada)
+  python main.py --upload-only video.mp4
+  python main.py --upload-only ./videos
+
+  # Debug
+  python main.py --debug "https://site.com/video"
+        """,
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
@@ -230,14 +337,13 @@ def parse_args():
     group.add_argument('--upload-only', help='Upload file/folder ke Streamtape (tanpa scraping)')
     group.add_argument('--debug', help='Debug halaman (screenshot + info)')
 
-    parser.add_argument('--output', '-o', default=None, help='Output filename')
+    parser.add_argument('--output', '-o', default=None, help='Output filename (default: judul video)')
     parser.add_argument('--output-dir', default='.', help='Output directory untuk batch')
     parser.add_argument('--referer', '-r', default=None, help='Custom referer header')
-    
-    # Flag terpisah untuk upload setelah download
     parser.add_argument('--upload', action='store_true', help='Upload ke Streamtape setelah download')
 
     return parser.parse_args()
+
 
 def main():
     args = parse_args()
@@ -245,7 +351,7 @@ def main():
 
     print(f"""
 ╔══════════════════════════════════════╗
-║       🎬 VIDEO SCRAPER v1.1         ║
+║       🎬 VIDEO SCRAPER v1.2         ║
 ╚══════════════════════════════════════╝
     """)
 
@@ -257,20 +363,19 @@ def main():
             referer=args.referer or config.DEFAULT_REFERER,
         )
 
-        # Upload jika ada flag --upload juga? 
-        # (butuh modifikasi argparse kalau mau combine)
+        # Upload jika flag --upload ada
+        if success and args.upload:
+            output_file = args.output or config.DEFAULT_OUTPUT
+            loop.run_until_complete(upload_to_streamtape(output_file))
 
     elif args.url:
         # ── Single scrape ──
-        # Cek apakah --upload dipakai sebagai flag (bukan path)
-        do_upload = args.upload is True if hasattr(args, 'upload') else False
-
         loop.run_until_complete(
             scrape_single(
                 url=args.url,
                 output=args.output,
                 referer=args.referer,
-                upload=do_upload,
+                upload=args.upload,
             )
         )
 
@@ -287,24 +392,18 @@ def main():
 
         os.makedirs(args.output_dir, exist_ok=True)
 
-        do_upload = args.upload is True if hasattr(args, 'upload') else False
-
         loop.run_until_complete(
             scrape_batch(
                 urls=urls,
                 output_dir=args.output_dir,
                 referer=args.referer,
-                upload=do_upload,
+                upload=args.upload,
             )
         )
 
-    elif args.upload:
+    elif args.upload_only:
         # ── Upload only ──
-        if args.upload is True:
-            print("❌ Harus kasih path! Contoh: --upload video.mp4")
-            sys.exit(1)
-
-        loop.run_until_complete(upload_only(args.upload))
+        loop.run_until_complete(upload_only(args.upload_only))
 
     elif args.debug:
         # ── Debug ──
