@@ -10,6 +10,7 @@ Download dan upload video HLS stream ke Streamtape secara otomatis.
 - 📊 Proses batch dari CSV
 - 🔄 Concurrent download & upload
 - 🧹 Auto hapus file setelah upload
+- 🌐 Domain Adapter System - auto-generate scraper untuk website baru
 
 ## 🚀 Cara Install
 
@@ -71,6 +72,26 @@ python -m stream_getter --upload-only ./folder_video
 python -m stream_getter --debug "https://example.com/video"
 ```
 
+### 7. Adapter Scout - Auto Generate Scraper
+
+```bash
+# Analisa website dan generate adapter otomatis
+python -m stream_getter --scout "https://example.com/video-page"
+```
+
+### 8. CSV Getter - Scrape Video Listings ke CSV
+
+```bash
+# Ambil semua video dari halaman list ke CSV
+python -m csv_getter "https://example.com/videos" -o videos.csv
+
+# Dengan konkurensi
+python -m csv_getter "https://example.com/videos" -o videos.csv -c 5
+
+# Generate adapter untuk website baru
+python -m csv_getter --scout "https://example.com/videos"
+```
+
 ## 📊 Contoh CSV
 
 ```csv
@@ -129,11 +150,17 @@ DELETE_AFTER_UPLOAD = True   # Hapus file setelah upload
 │   ├── __init__.py
 │   ├── cli/                 # Command line interface
 │   │   ├── main.py
-│   │   └── parser.py
+│   │   ├── parser.py
+│   │   └── scout.py         # Adapter Scout
 │   ├── core/                # Core scraping
 │   │   ├── browser.py
 │   │   ├── interceptor.py
-│   │   └── stream_getter.py
+│   │   └── scraper.py
+│   ├── adapters/            # Domain adapters
+│   │   ├── __init__.py      # BaseAdapter & AdapterRegistry
+│   │   └── domains/         # Domain-specific adapters
+│   │       ├── indovidz.py
+│   │       └── ...
 │   ├── pipeline/            # Processing pipelines
 │   │   ├── batch.py
 │   │   ├── csv.py
@@ -144,10 +171,20 @@ DELETE_AFTER_UPLOAD = True   # Hapus file setelah upload
 │       ├── exceptions.py
 │       ├── helpers.py
 │       └── validators.py
+├── csv_getter/              # Video listing to CSV
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── scraper.py           # Main CSV scraper
+│   ├── scout.py             # Adapter generator
+│   └── adapters/            # Domain adapters for CSV
+│       ├── __init__.py
+│       └── domains/
 └── requirements.txt
 ```
 
 ## 🔧 CLI Options
+
+### stream_getter
 
 | Option | Description |
 |--------|-------------|
@@ -156,12 +193,65 @@ DELETE_AFTER_UPLOAD = True   # Hapus file setelah upload
 | `--batch` | Text file dengan list URL |
 | `--csv` | CSV file untuk batch processing |
 | `--upload-only` | Upload file/folder saja |
+| `--scout` | Adapter Scout - auto generate scraper |
 | `--debug` | Debug mode |
 | `-o, --output` | Output filename |
 | `-d, --output-dir` | Output directory |
 | `-r, --referer` | Custom HTTP referer |
 | `-u, --upload` | Upload setelah download |
 | `--csv-column` | Nama kolom URL di CSV |
+
+### csv_getter
+
+| Option | Description |
+|--------|-------------|
+| `--scout` | Generate adapter untuk website |
+| `-o, --output` | Output CSV filename |
+| `-c, --concurrency` | Jumlah concurrent requests |
+| `--page-selector` | CSS selector untuk video item |
+| `--url-selector` | CSS selector untuk link video |
+| `--title-selector` | CSS selector untuk title |
+| `--next-selector` | CSS selector untuk next page button |
+
+## 🌐 Domain Adapter System
+
+### Cara Kerja
+
+Adapter adalah class yang menangani cara scraping website tertentu. Setiap adapter mendefinisikan:
+- Selector untuk elemen video
+- Cara mengambil title
+- Cara mengambil URL video
+
+### Adapter yang Tersedia
+
+- `indovidz.py` - IndoVids/NewVIDS
+- `bokepindo.py` - BokepIndo
+- `sebokep_com.py` - Sebokep.com
+
+### Buat Adapter Baru
+
+```bash
+# Auto-generate dengan Scout
+python -m stream_getter --scout "https://site baru.com/video"
+```
+
+Atau buat manual:
+
+```python
+from stream_getter.adapters import BaseAdapter
+
+class MySiteAdapter(BaseAdapter):
+    DOMAIN = "mysite.com"
+    
+    def get_video_url(self, page):
+        # Return m3u8 URL
+        return page.evaluate("""() => {
+            return document.querySelector('video source').src;
+        }""")
+    
+    def get_title(self, page):
+        return page.title()
+```
 
 ## 📝 Log Output
 
@@ -178,6 +268,7 @@ DELETE_AFTER_UPLOAD = True   # Hapus file setelah upload
 - CSV akan di-update in-place
 - File video bisa dihapus otomatis setelah upload sukses
 - Gunakan `--referer` jika site butuh validasi referer
+- Gunakan `--scout` untuk membuat adapter otomatis untuk website baru
 
 ## 📜 License
 
