@@ -81,7 +81,7 @@ class VideoScraper:
         
         # Step 2: Check for M3U8 during initial load
         if self.interceptor.has_m3u8():
-            logger.info("M3U8 found during page load")
+            logger.debug("M3U8 found during page load")
             return self.interceptor.get_m3u8_urls()
         
         # Step 3: Inject JavaScript interceptors
@@ -145,7 +145,7 @@ class VideoScraper:
             await self.browser.close_popups()
             
             if self.interceptor.has_m3u8():
-                logger.info("M3U8 captured after play")
+                logger.debug("M3U8 captured after play")
                 return True
             
             # Check if video is playing

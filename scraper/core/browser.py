@@ -71,7 +71,7 @@ class BrowserManager:
             
             self._page = await self._context.new_page()
             
-            logger.info("Browser started successfully")
+            logger.debug("Browser started successfully")
             
         except Exception as e:
             await self.close()
@@ -98,7 +98,7 @@ class BrowserManager:
         self._page = None
         self._playwright = None
         
-        logger.info("Browser closed")
+        logger.debug("Browser closed")
     
     async def navigate(self, url: str, wait_until: str = "commit") -> None:
         """

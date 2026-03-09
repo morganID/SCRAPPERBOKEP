@@ -86,7 +86,7 @@ class VideoDownloader:
         output_file = output_file or self.default_output
         referer = referer or self.default_referer
         
-        logger.info(f"Downloading: {m3u8_url[:60]}...")
+        logger.debug(f"Downloading: {m3u8_url[:60]}...")
         logger.debug(f"Output: {output_file}")
         
         cmd = self._build_ffmpeg_command(m3u8_url, output_file, referer)
@@ -180,7 +180,7 @@ class VideoDownloader:
         Returns:
             True if download succeeded, False otherwise.
         """
-        logger.info(f"Direct download: {m3u8_url[:60]}")
+        logger.debug(f"Direct download: {m3u8_url[:60]}")
         return self.download(m3u8_url, output_file, referer)
 
 

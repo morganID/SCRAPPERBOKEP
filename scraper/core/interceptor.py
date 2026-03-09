@@ -57,7 +57,7 @@ class NetworkInterceptor:
                 'time': datetime.now().isoformat(),
             })
             self.m3u8_found = True
-            logger.info(f"[M3U8] {url}")
+            logger.debug(f"[M3U8] {url}")
         
         # Check for TS segments
         elif '.ts' in url:
@@ -68,12 +68,12 @@ class NetworkInterceptor:
         # Check for MP4 (excluding ads)
         elif '.mp4' in url and 'ad' not in url.lower():
             self.captured_urls['mp4'].append(url)
-            logger.info(f"[MP4] {url}")
+            logger.debug(f"[MP4] {url}")
         
         # Check for videoplayback URLs
         elif 'videoplayback' in url:
             self.captured_urls['videoplayback'].append(url)
-            logger.info(f"[PLAYBACK] {url}")
+            logger.debug(f"[PLAYBACK] {url}")
     
     def on_response(self, response) -> None:
         """
@@ -100,7 +100,7 @@ class NetworkInterceptor:
         """
         unique = list({item['url'] for item in self.captured_urls['m3u8']})
         
-        logger.info(
+        logger.debug(
             f"Results: {len(unique)} M3U8, "
             f"{len(self.captured_urls['ts'])} TS, "
             f"{len(self.captured_urls['mp4'])} MP4, "
@@ -109,7 +109,7 @@ class NetworkInterceptor:
         )
         
         for i, url in enumerate(unique):
-            logger.info(f"  M3U8 [{i+1}] {url}")
+            logger.debug(f"  M3U8 [{i+1}] {url}")
         
         return unique
     
