@@ -1,10 +1,10 @@
 """
-Scraper Core - Core functionality for video scraping.
+Stream Getter Core - Core functionality for video scraping.
 """
 
 from .browser import BrowserManager
 from .interceptor import NetworkInterceptor
-from .scraper import VideoScraper
+from .stream_getter import VideoScraper
 
 __all__ = [
     "BrowserManager",
