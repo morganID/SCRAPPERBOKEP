@@ -8,9 +8,9 @@ import os
 from typing import List, Dict, Any, Optional
 
 import config
-from downloader import download_video, pick_best_url
-from uploader import upload_to_streamtape
-from csv_helper import (
+from .downloader import download_video, pick_best_url
+from .uploader import upload_to_streamtape
+from .csv_helper import (
     read_csv, save_csv, detect_url_column,
     ensure_columns, get_pending_rows, print_summary,
 )

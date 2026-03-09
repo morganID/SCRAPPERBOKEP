@@ -8,8 +8,8 @@ import os
 import sys
 
 import config
-from downloader import download_direct, download_video
-from uploader import upload_multiple, upload_to_streamtape
+from scraper.pipeline import download_direct, download_video
+from scraper.pipeline import upload_multiple, upload_to_streamtape
 from .parser import create_parser
 from ..core.scraper import VideoScraper
 from ..core.interceptor import NetworkInterceptor
@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 
 BANNER = """
 ╔══════════════════════════════════════════╗
-║         🎬 VIDEO SCRAPER v2.0            ║
-║         ⚡ Concurrent Pipeline            ║
+          🎬 VIDEO SCRAPER v2.0            
+         ⚡ Concurrent Pipeline            
 ╚══════════════════════════════════════════╝
 """
 
