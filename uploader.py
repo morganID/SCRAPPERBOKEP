@@ -2,6 +2,7 @@
 
 import os
 import re
+import json
 import asyncio
 import aiohttp
 import config
@@ -9,7 +10,8 @@ import config
 
 async def upload_to_streamtape(file_path, folder_id=None):
     """
-    Upload 1 file ke Streamtape
+    Upload 1 file ke Streamtape.
+    Return URL string jika sukses, None jika gagal.
     """
     if not os.path.exists(file_path):
         print(f"   ❌ File tidak ditemukan: {file_path}")
@@ -29,7 +31,7 @@ async def upload_to_streamtape(file_path, folder_id=None):
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
         try:
-            # Step 1: Get upload URL
+            # ── Step 1: Get upload URL ──
             api_url = (
                 f"https://api.streamtape.com/file/ul"
                 f"?login={config.STREAMTAPE_LOGIN}"
@@ -45,20 +47,20 @@ async def upload_to_streamtape(file_path, folder_id=None):
                     return None
                 upload_url = data['result']['url']
 
-            # Step 2: Upload file
+            # ── Step 2: Upload file ──
             with open(file_path, 'rb') as f:
                 form = aiohttp.FormData()
-                form.add_field('file1', f, filename=filename, content_type='video/mp4')
+                form.add_field(
+                    'file1', f,
+                    filename=filename,
+                    content_type='video/mp4'
+                )
 
                 async with session.post(upload_url, data=form) as resp:
                     content_type = resp.headers.get('Content-Type', '')
                     response_text = await resp.text()
-                    
-                    # Debug: tampilkan response
-                    print(f"   📡 Response status: {resp.status}")
-                    print(f"   📡 Content-Type: {content_type}")
-                    
-                    # Coba parse sebagai JSON
+
+                    # ── Try 1: Parse JSON response ──
                     if 'application/json' in content_type:
                         try:
                             result = json.loads(response_text)
@@ -68,53 +70,66 @@ async def upload_to_streamtape(file_path, folder_id=None):
                                 return url
                             else:
                                 print(f"   ❌ Failed: {result.get('msg')}")
-                        except:
+                                return None
+                        except (json.JSONDecodeError, KeyError, TypeError):
                             pass
-                    
-                    # Response mungkin berisi URL langsung atau info lain
-                    # Cari URL pattern di response
-                    match = re.search(r'https?://streamtape\.com/v/([a-zA-Z0-9]+)', response_text)
+
+                    # ── Try 2: Regex cari URL streamtape ──
+                    match = re.search(
+                        r'https?://streamtape\.com/v/([a-zA-Z0-9]+)',
+                        response_text
+                    )
                     if match:
                         url = match.group(0)
                         print(f"   ✅ Uploaded: {url}")
                         return url
-                    
-                    # Cari video ID pattern
-                    match = re.search(r'"id"\s*:\s*"([a-zA-Z0-9]+)"', response_text)
+
+                    # ── Try 3: Regex cari video ID ──
+                    match = re.search(
+                        r'"id"\s*:\s*"([a-zA-Z0-9]+)"',
+                        response_text
+                    )
                     if match:
                         video_id = match.group(1)
                         url = f"https://streamtape.com/v/{video_id}"
                         print(f"   ✅ Uploaded: {url}")
                         return url
-                    
-                    # Kalau status 200, kemungkinan sukses - tunggu dan cek file list
+
+                    # ── Try 4: HTTP 200 → cek file list ──
                     if resp.status == 200:
-                        print(f"   ⏳ Upload selesai, menunggu proses...")
-                        
-                        # Tunggu beberapa detik biar Streamtape proses
+                        print(f"   ⏳ Upload selesai, mencari file...")
+
                         for attempt in range(5):
-                            await asyncio.sleep(3)  # Tunggu 3 detik
-                            print(f"   🔍 Checking file list... (attempt {attempt + 1}/5)")
-                            
-                            found_url = await check_uploaded_file(session, filename, folder_id)
+                            await asyncio.sleep(3)
+                            print(f"   🔍 Checking... ({attempt + 1}/5)")
+
+                            found_url = await _find_uploaded_file(
+                                session, filename, folder_id
+                            )
                             if found_url:
                                 return found_url
-                        
-                        print(f"   ⚠️ File mungkin sudah terupload tapi URL belum tersedia")
-                        print(f"   💡 Cek manual di: https://streamtape.com/videos")
+
+                        print(f"   ⚠️ URL belum tersedia")
+                        print(f"   💡 Cek manual: https://streamtape.com/videos")
                         return None
-                    
-                    print(f"   ❌ Failed: HTTP {resp.status}")
+
+                    print(f"   ❌ HTTP {resp.status}")
                     print(f"   Response: {response_text[:300]}")
                     return None
 
+        except asyncio.TimeoutError:
+            print(f"   ❌ Timeout (file terlalu besar?)")
+            return None
         except Exception as e:
             print(f"   ❌ Error: {e}")
             return None
 
 
-async def check_uploaded_file(session, filename, folder_id=None):
-    """Cek file dari file list API"""
+async def _find_uploaded_file(session, filename, folder_id=None):
+    """
+    Cari file yang baru diupload dari file list API.
+    Return URL jika ketemu, None jika belum.
+    """
     try:
         api_url = (
             f"https://api.streamtape.com/file/listfolder"
@@ -123,55 +138,53 @@ async def check_uploaded_file(session, filename, folder_id=None):
         )
         if folder_id:
             api_url += f"&folder={folder_id}"
-        
+
         async with session.get(api_url) as resp:
             data = await resp.json()
-            
-            if data.get('status') == 200:
-                files = data.get('result', {}).get('files', [])
-                
-                # Bersihkan filename untuk comparison
-                clean_filename = os.path.splitext(filename)[0].lower()
-                clean_filename = re.sub(r'[^a-z0-9]', '', clean_filename)
-                
-                # Cari file dengan nama yang mirip (terbaru dulu)
-                for f in reversed(files):
-                    file_name = f.get('name', '')
-                    clean_name = os.path.splitext(file_name)[0].lower()
-                    clean_name = re.sub(r'[^a-z0-9]', '', clean_name)
-                    
-                    # Cek kesamaan
-                    if clean_filename in clean_name or clean_name in clean_filename:
-                        file_id = f.get('linkid')
+
+            if data.get('status') != 200:
+                return None
+
+            files = data.get('result', {}).get('files', [])
+            if not files:
+                return None
+
+            # Bersihkan filename untuk comparison
+            clean_target = re.sub(
+                r'[^a-z0-9]', '',
+                os.path.splitext(filename)[0].lower()
+            )
+
+            # Cari file dengan nama yang cocok (terbaru dulu)
+            for f in reversed(files):
+                file_name = f.get('name', '')
+                clean_name = re.sub(
+                    r'[^a-z0-9]', '',
+                    os.path.splitext(file_name)[0].lower()
+                )
+
+                if clean_target == clean_name or \
+                   clean_target in clean_name or \
+                   clean_name in clean_target:
+                    file_id = f.get('linkid')
+                    if file_id:
                         url = f"https://streamtape.com/v/{file_id}"
                         print(f"   ✅ Found: {url}")
                         return url
-                
-                # Fallback: ambil file terbaru (yang baru diupload)
-                if files:
-                    latest = files[-1]
-                    file_id = latest.get('linkid')
-                    latest_name = latest.get('name', '')
-                    
-                    # Konfirmasi dengan user
-                    print(f"   🔍 File terbaru: {latest_name}")
-                    url = f"https://streamtape.com/v/{file_id}"
-                    print(f"   ✅ Assuming: {url}")
-                    return url
-                        
-        return None
-        
+
+            return None
+
     except Exception as e:
-        print(f"   ⚠️ Error checking: {e}")
+        print(f"   ⚠️ Check error: {e}")
         return None
 
 
 async def upload_multiple(file_paths, folder_id=None, concurrent=3):
-    """Upload banyak file sekaligus ke folder tertentu"""
+    """Upload banyak file ke folder tertentu"""
     folder_id = folder_id or getattr(config, 'STREAMTAPE_FOLDER', None)
     semaphore = asyncio.Semaphore(concurrent)
 
-    async def upload_with_semaphore(fp):
+    async def _upload_one(fp):
         async with semaphore:
             url = await upload_to_streamtape(fp, folder_id)
             return {
@@ -183,16 +196,16 @@ async def upload_multiple(file_paths, folder_id=None, concurrent=3):
     print(f"\n{'='*50}")
     print(f"🚀 STREAMTAPE UPLOADER")
     print(f"{'='*50}")
-    print(f"📁 Files    : {len(file_paths)}")
-    print(f"📂 Folder   : {folder_id or 'root'}")
-    print(f"⚡ Concurrent: {concurrent}")
+    print(f"📁 Files      : {len(file_paths)}")
+    print(f"📂 Folder     : {folder_id or 'root'}")
+    print(f"⚡ Concurrent : {concurrent}")
     print(f"{'='*50}")
 
-    tasks = [upload_with_semaphore(fp) for fp in file_paths]
+    tasks = [_upload_one(fp) for fp in file_paths]
     results = await asyncio.gather(*tasks)
 
     success = sum(1 for r in results if r['status'] == 'success')
-    
+
     print(f"\n{'='*50}")
     print(f"📊 SUMMARY: {success}/{len(results)} berhasil")
     print(f"{'='*50}")
@@ -200,7 +213,7 @@ async def upload_multiple(file_paths, folder_id=None, concurrent=3):
     return results
 
 
-# ============ HELPER FUNCTIONS ============
+# ============ FOLDER HELPERS ============
 
 async def list_folders():
     """List semua folder di Streamtape"""
@@ -212,7 +225,7 @@ async def list_folders():
         )
         async with session.get(api_url) as resp:
             data = await resp.json()
-            
+
             if data.get('status') == 200:
                 folders = data.get('result', {}).get('folders', [])
                 print("\n📁 Folders:")
@@ -235,10 +248,10 @@ async def create_folder(name, parent_id=None):
         )
         if parent_id:
             api_url += f"&folder={parent_id}"
-            
+
         async with session.get(api_url) as resp:
             data = await resp.json()
-            
+
             if data.get('status') == 200:
                 folder_id = data['result']['folderid']
                 print(f"✅ Folder created: {name} (ID: {folder_id})")

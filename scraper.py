@@ -1,9 +1,13 @@
 """Video Scraper - Intercept M3U8/MP4 dari halaman video"""
 
 import asyncio
+import logging
 from datetime import datetime
 from playwright.async_api import async_playwright
 import config
+
+# ── Logger ──
+logger = logging.getLogger(__name__)
 
 
 class VideoScraper:
@@ -47,7 +51,7 @@ class VideoScraper:
         self.page.on("request", self._on_request)
         self.page.on("response", self._on_response)
 
-        print("✅ Browser started")
+        logger.info("Browser started")
 
     async def close(self):
         """Tutup browser"""
@@ -55,7 +59,7 @@ class VideoScraper:
             await self.browser.close()
         if self.pw:
             await self.pw.stop()
-        print("🔒 Browser closed")
+        logger.info("Browser closed")
 
     # ========================
     #  NETWORK INTERCEPTOR
@@ -72,19 +76,20 @@ class VideoScraper:
                 'time': datetime.now().isoformat(),
             })
             self.m3u8_found = True
-            print(f"  🎯 [M3U8] {url}")
+            logger.info(f"[M3U8] {url}")
 
         elif '.ts' in url:
             if url not in self.captured_urls['ts']:
                 self.captured_urls['ts'].append(url)
+                logger.debug(f"[TS] {url}")
 
         elif '.mp4' in url and 'ad' not in url.lower():
             self.captured_urls['mp4'].append(url)
-            print(f"  🎯 [MP4] {url}")
+            logger.info(f"[MP4] {url}")
 
         elif 'videoplayback' in url:
             self.captured_urls['videoplayback'].append(url)
-            print(f"  🎯 [PLAYBACK] {url}")
+            logger.info(f"[PLAYBACK] {url}")
 
     async def _on_response(self, response):
         """Intercept setiap response masuk"""
@@ -94,6 +99,7 @@ class VideoScraper:
                 'url': response.url,
                 'content_type': content_type,
             })
+            logger.debug(f"[MEDIA] {response.url} ({content_type})")
 
     # ========================
     #  AD HANDLING
@@ -107,17 +113,16 @@ class VideoScraper:
                 try:
                     await page.close()
                     closed += 1
-                except:
+                except Exception:
                     pass
         if closed > 0:
-            print(f"    🗑️ Tutup {closed} popup")
+            logger.debug(f"Closed {closed} popup(s)")
 
     async def remove_ad_overlays(self):
         """Hapus overlay iklan dari halaman"""
         try:
             await self.page.evaluate("""
             () => {
-                // Hapus overlay z-index tinggi
                 document.querySelectorAll('*').forEach(el => {
                     const z = parseInt(getComputedStyle(el).zIndex);
                     if (z > 999 && el.tagName !== 'VIDEO' && !el.closest('.plyr')) {
@@ -125,7 +130,6 @@ class VideoScraper:
                     }
                 });
 
-                // Hapus ad elements
                 const sels = %s;
                 sels.forEach(sel => {
                     document.querySelectorAll(sel).forEach(el => {
@@ -135,7 +139,6 @@ class VideoScraper:
                     });
                 });
 
-                // Hapus overlay transparan
                 document.querySelectorAll('div').forEach(el => {
                     const style = getComputedStyle(el);
                     if (parseFloat(style.opacity) === 0 && style.position === 'fixed') {
@@ -144,9 +147,9 @@ class VideoScraper:
                 });
             }
             """ % str(config.AD_SELECTORS))
-            print("    🧹 Overlay dihapus")
-        except:
-            pass
+            logger.debug("Ad overlays removed")
+        except Exception:
+            logger.debug("Failed to remove overlays (non-critical)")
 
     # ========================
     #  PLAY VIDEO
@@ -155,22 +158,21 @@ class VideoScraper:
     async def click_play(self):
         """Klik play button sambil handle ads"""
         for attempt in range(config.PLAY_ATTEMPTS):
-            print(f"\n  ▶️ Play attempt {attempt + 1}/{config.PLAY_ATTEMPTS}")
+            logger.debug(f"Play attempt {attempt + 1}/{config.PLAY_ATTEMPTS}")
 
             await self.remove_ad_overlays()
             await asyncio.sleep(1)
 
-            # Coba klik setiap selector
             clicked = False
             for selector in config.PLAY_SELECTORS:
                 try:
                     btn = self.page.locator(selector).first
                     if await btn.is_visible(timeout=2000):
                         await btn.click(timeout=3000)
-                        print(f"    ✅ Klik '{selector}'")
+                        logger.debug(f"Clicked '{selector}'")
                         clicked = True
                         break
-                except:
+                except Exception:
                     continue
 
             if not clicked:
@@ -179,12 +181,10 @@ class VideoScraper:
             await asyncio.sleep(config.WAIT_AFTER_CLICK)
             await self.close_popups()
 
-            # Cek apakah m3u8 sudah ketangkap
             if self.captured_urls['m3u8']:
-                print("    ✅ M3U8 ketangkap!")
+                logger.info("M3U8 captured after play")
                 return True
 
-            # Cek apakah video playing
             is_playing = await self.page.evaluate("""
             () => {
                 const v = document.querySelector('video');
@@ -192,7 +192,7 @@ class VideoScraper:
             }
             """)
             if is_playing:
-                print("    ✅ Video playing!")
+                logger.debug("Video is playing")
                 return True
 
         # Last resort
@@ -209,9 +209,9 @@ class VideoScraper:
                 if (v) { v.muted = true; v.play(); }
             }
             """)
-            print("    ⚡ Force play via JS")
-        except:
-            pass
+            logger.debug("Force play via JS")
+        except Exception:
+            logger.debug("Force play failed (non-critical)")
 
     # ========================
     #  EXTRACT M3U8
@@ -224,13 +224,11 @@ class VideoScraper:
             () => {
                 const urls = [];
 
-                // Dari script tags
                 document.querySelectorAll('script').forEach(s => {
                     const m = s.textContent.match(/https?:\\/\\/[^\\s'"]+\\.m3u8[^\\s'"]*/g);
                     if (m) urls.push(...m);
                 });
 
-                // Dari video element
                 const v = document.querySelector('video');
                 if (v) {
                     if (v.src && !v.src.startsWith('blob:')) urls.push(v.src);
@@ -242,7 +240,7 @@ class VideoScraper:
                 return urls;
             }
             """)
-        except:
+        except Exception:
             return []
 
     async def inject_interceptor(self):
@@ -266,13 +264,15 @@ class VideoScraper:
                 };
             }
             """)
-        except:
-            pass
+            logger.debug("JS interceptor injected")
+        except Exception:
+            logger.debug("Failed to inject interceptor")
 
     async def collect_js_intercepted(self):
         """Ambil URL dari JS interceptor"""
         try:
             js_urls = await self.page.evaluate("() => window.__intercepted || []")
+            count = 0
             for u in js_urls:
                 if isinstance(u, str) and '.m3u8' in u:
                     self.captured_urls['m3u8'].append({
@@ -280,7 +280,10 @@ class VideoScraper:
                         'headers': {},
                         'time': datetime.now().isoformat(),
                     })
-        except:
+                    count += 1
+            if count:
+                logger.debug(f"Collected {count} M3U8 from JS interceptor")
+        except Exception:
             pass
 
     # ========================
@@ -303,7 +306,7 @@ class VideoScraper:
                 return items;
             }
             """)
-        except:
+        except Exception:
             return []
 
     # ========================
@@ -312,12 +315,10 @@ class VideoScraper:
 
     async def scrape(self, url):
         """Main scraping function - return list of m3u8 URLs"""
-        print(f"\n{'='*60}")
-        print(f"🎬 SCRAPING: {url}")
-        print(f"{'='*60}\n")
+        print(f"\n🎬 Scraping: {url}")
 
-        # [1] Buka halaman (jangan tunggu networkidle)
-        print("[1/5] Membuka halaman...")
+        # [1] Buka halaman
+        logger.debug("Opening page...")
         try:
             await self.page.goto(
                 url,
@@ -325,34 +326,29 @@ class VideoScraper:
                 timeout=config.PAGE_TIMEOUT,
             )
         except Exception as e:
-            print(f"  ⚠️ Timeout tapi lanjut: {e}")
+            logger.warning(f"Page load timeout (continuing): {e}")
 
         await asyncio.sleep(config.BUFFER_WAIT)
 
         # [2] Cek m3u8 dari loading awal
-        print("\n[2/5] Cek M3U8 dari loading awal...")
         if self.captured_urls['m3u8']:
-            print("  ✅ M3U8 sudah ketangkap!")
+            logger.info("M3U8 found during page load")
             return self._get_unique_m3u8()
 
         # [3] Inject interceptor + info server
-        print("\n[3/5] Inject interceptor...")
         await self.inject_interceptor()
 
         servers = await self.get_server_urls()
         if servers:
-            print(f"  📡 {len(servers)} server ditemukan:")
+            logger.debug(f"{len(servers)} server(s) found")
             for s in servers:
-                icon = "🟢" if s.get('active') else "⚪"
-                url_preview = (s.get('url') or '')[:80]
-                print(f"    {icon} {s['name']}: {url_preview}")
+                logger.debug(f"  {'[active]' if s.get('active') else '       '} "
+                             f"{s['name']}: {(s.get('url') or '')[:80]}")
 
-        # [4] Klik play (handle ads)
-        print("\n[4/5] Play video...")
+        # [4] Klik play
         await self.click_play()
 
         # [5] Kumpulkan semua URL
-        print("\n[5/5] Mengumpulkan URL...")
         await asyncio.sleep(config.BUFFER_WAIT)
         await self.collect_js_intercepted()
 
@@ -365,24 +361,27 @@ class VideoScraper:
                     'time': datetime.now().isoformat(),
                 })
 
-        return self._get_unique_m3u8()
+        result = self._get_unique_m3u8()
+
+        if result:
+            print(f"✅ Found {len(result)} M3U8 URL(s)")
+        else:
+            print(f"❌ No M3U8 found")
+
+        return result
 
     def _get_unique_m3u8(self):
         """Deduplicate dan return m3u8 URLs"""
         unique = list({item['url'] for item in self.captured_urls['m3u8']})
 
-        print(f"\n{'='*60}")
-        print(f"📊 HASIL:")
-        print(f"  M3U8      : {len(unique)}")
-        print(f"  TS        : {len(self.captured_urls['ts'])} segments")
-        print(f"  MP4       : {len(self.captured_urls['mp4'])}")
-        print(f"  Playback  : {len(self.captured_urls['videoplayback'])}")
-        print(f"  Media     : {len(self.captured_urls['other_media'])}")
+        logger.info(f"Results: {len(unique)} M3U8, "
+                    f"{len(self.captured_urls['ts'])} TS, "
+                    f"{len(self.captured_urls['mp4'])} MP4, "
+                    f"{len(self.captured_urls['videoplayback'])} Playback, "
+                    f"{len(self.captured_urls['other_media'])} Media")
 
-        if unique:
-            print(f"\n📹 M3U8 URLs:")
-            for i, url in enumerate(unique):
-                print(f"  [{i+1}] {url}")
+        for i, url in enumerate(unique):
+            logger.info(f"  M3U8 [{i+1}] {url}")
 
         return unique
 
@@ -403,17 +402,17 @@ class VideoScraper:
         print(f"\n🔍 DEBUG: {url}\n")
 
         try:
-            await self.page.goto(url, wait_until='commit', timeout=config.PAGE_TIMEOUT)
-        except:
+            await self.page.goto(
+                url, wait_until='commit', timeout=config.PAGE_TIMEOUT
+            )
+        except Exception:
             pass
 
         await asyncio.sleep(5)
 
-        # Screenshot
         await self.page.screenshot(path=screenshot_path)
         print(f"📸 Screenshot: {screenshot_path}")
 
-        # Iframes
         iframes = await self.page.evaluate("""
         () => Array.from(document.querySelectorAll('iframe'))
               .map(f => ({src: f.src, id: f.id, class: f.className}))
@@ -422,7 +421,6 @@ class VideoScraper:
         for f in iframes:
             print(f"  {f}")
 
-        # Videos
         videos = await self.page.evaluate("""
         () => Array.from(document.querySelectorAll('video'))
               .map(v => ({src: v.src, poster: v.poster, currentSrc: v.currentSrc}))
@@ -431,7 +429,6 @@ class VideoScraper:
         for v in videos:
             print(f"  {v}")
 
-        # Servers
         servers = await self.get_server_urls()
         print(f"\n🖥️ Servers ({len(servers)}):")
         for s in servers:

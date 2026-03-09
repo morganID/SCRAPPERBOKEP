@@ -1,5 +1,18 @@
 """Konfigurasi default video scraper"""
+import logging
 
+# ── Log Level ──
+# DEBUG   = semua detail (development)
+# INFO    = info penting saja (production)
+# WARNING = hanya warning & error
+LOG_LEVEL = 'INFO'
+
+# ── Setup Logger ──
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
+)
 # Browser
 BROWSER_ARGS = [
     '--no-sandbox',
