@@ -1,11 +1,11 @@
 """
-Video Scraper Package - Modular video scraping library.
+Stream Getter Package - Modular HLS stream extraction.
 
-A scalable, well-organized video scraping library for extracting
-HLS (M3U8) streams from video pages.
+A scalable, well-organized library for extracting
+HLS (M3U8) streams from video pages with domain-specific adapters.
 
 Example usage:
-    from scraper import VideoScraper
+    from stream_getter import VideoScraper
     
     scraper = VideoScraper()
     await scraper.start_browser()
@@ -16,6 +16,7 @@ Example usage:
 from .core import VideoScraper, BrowserManager, NetworkInterceptor
 from .pipeline import BatchPipeline, CSVPipeline
 from .cli import run_cli
+from .adapters import BaseAdapter, AdapterRegistry
 from .utils import (
     sanitize_filename,
     unique_output,
@@ -49,4 +50,7 @@ __all__ = [
     "DownloadError",
     "UploadError",
     "ValidationError",
+    # Adapters
+    "BaseAdapter",
+    "AdapterRegistry",
 ]

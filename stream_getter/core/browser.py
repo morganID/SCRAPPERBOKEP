@@ -100,13 +100,14 @@ class BrowserManager:
         
         logger.debug("Browser closed")
     
-    async def navigate(self, url: str, wait_until: str = "commit") -> None:
+    async def navigate(self, url: str, wait_until: str = "commit", referer: str = None) -> None:
         """
         Navigate to a URL.
         
         Args:
             url: The URL to navigate to.
             wait_until: Wait strategy (commit, domcontentloaded, networkidle, load).
+            referer: Optional referer URL to set.
             
         Raises:
             BrowserError: If navigation fails.
@@ -115,10 +116,15 @@ class BrowserManager:
             raise BrowserError("Browser not started. Call start() first.")
         
         try:
+            extra_args = {}
+            if referer:
+                extra_args["referer"] = referer
+            
             await self._page.goto(
                 url,
                 wait_until=wait_until,
                 timeout=config.PAGE_TIMEOUT,
+                **extra_args
             )
             logger.debug(f"Navigated to: {url}")
         except Exception as e:

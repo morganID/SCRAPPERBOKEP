@@ -11,6 +11,7 @@ from playwright.async_api import Page
 import config
 from .browser import BrowserManager
 from .interceptor import NetworkInterceptor, JavaScriptInterceptor
+from ..adapters import AdapterRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -72,23 +73,33 @@ class VideoScraper:
         Returns:
             List of M3U8 URLs found on the page.
         """
-        # print(f"\n🎬 Scraping: {url}")
+        # Get domain-specific adapter
+        adapter = AdapterRegistry.get_adapter(url, self.page, self.interceptor)
+        domain = AdapterRegistry.get_domain(url)
+        logger.debug(f"Using adapter for: {domain}")
+        
+        # Call before_scrape hook
+        await adapter.before_scrape()
         
         # Step 1: Navigate to the page
         logger.debug("Opening page...")
-        await self.browser.navigate(url)
+        
+        # Get custom referer if needed
+        referer = adapter.get_referer()
+        await self.browser.navigate(url, referer=referer)
         await asyncio.sleep(config.BUFFER_WAIT)
         
         # Step 2: Check for M3U8 during initial load
         if self.interceptor.has_m3u8():
             logger.debug("M3U8 found during page load")
-            return self.interceptor.get_m3u8_urls()
+            result = self.interceptor.get_m3u8_urls()
+            return await adapter.after_scrape(result)
         
         # Step 3: Inject JavaScript interceptors
         await JavaScriptInterceptor.inject(self.page)
         
-        # Step 4: Click play button to trigger video loading
-        await self._click_play_button()
+        # Step 4: Click play button using adapter's method
+        await adapter.click_play()
         
         # Step 5: Collect all captured URLs
         await asyncio.sleep(config.BUFFER_WAIT)
@@ -104,6 +115,9 @@ class VideoScraper:
                 })
         
         result = self.interceptor.get_m3u8_urls()
+        
+        # Call after_scrape hook
+        result = await adapter.after_scrape(result)
         
         if result:
             print(f"✅ Found {len(result)} M3U8 URL(s)")
