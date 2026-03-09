@@ -5,13 +5,13 @@ import logging
 # DEBUG   = semua detail (development)
 # INFO    = info penting saja (production)
 # WARNING = hanya warning & error
-LOG_LEVEL = 'WARNING'
+LOG_LEVEL = 'INFO'
 
 # ── Setup Logger ──
+# Format: [LEVEL] time | message
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S',
+    format='[%(levelname)s] %(message)s',
 )
 # Browser
 BROWSER_ARGS = [
@@ -80,3 +80,6 @@ STREAMTAPE_FOLDER = "H2fH6LGMOMk"  # ← Tambah ini
 
 MAX_CONCURRENT_DOWNLOADS = 3
 MAX_CONCURRENT_UPLOADS = 2
+
+# ── File Management ──
+DELETE_AFTER_UPLOAD = True  # Hapus file video setelah upload sukses

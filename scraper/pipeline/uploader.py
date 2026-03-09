@@ -56,6 +56,7 @@ class StreamtapeUploader:
         self,
         file_path: str,
         folder_id: Optional[str] = None,
+        delete_after: Optional[bool] = None,
     ) -> Optional[str]:
         """
         Upload a single file to Streamtape.
@@ -63,6 +64,7 @@ class StreamtapeUploader:
         Args:
             file_path: Path to the video file.
             folder_id: Optional folder ID.
+            delete_after: Delete file after successful upload (default from config).
             
         Returns:
             Streamtape URL if successful, None otherwise.
@@ -74,6 +76,7 @@ class StreamtapeUploader:
         filename = os.path.basename(file_path)
         file_size = os.path.getsize(file_path) / (1024 * 1024)
         folder_id = folder_id or self.default_folder
+        delete_after = delete_after if delete_after is not None else getattr(config, 'DELETE_AFTER_UPLOAD', False)
         
         logger.info(f"Uploading: {filename} ({file_size:.1f} MB)")
         
@@ -85,7 +88,17 @@ class StreamtapeUploader:
                     return None
                 
                 # Step 2: Upload file
-                return await self._upload_file(session, upload_url, file_path, filename)
+                result = await self._upload_file(session, upload_url, file_path, filename)
+                
+                # Step 3: Delete file after successful upload
+                if result and delete_after:
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"Deleted: {file_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete {file_path}: {e}")
+                
+                return result
                 
             except asyncio.TimeoutError:
                 logger.error(f"Upload timeout: {filename}")
@@ -248,6 +261,7 @@ class StreamtapeUploader:
         file_paths: List[str],
         folder_id: Optional[str] = None,
         concurrent: int = 3,
+        delete_after: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         Upload multiple files with concurrency control.
@@ -256,16 +270,18 @@ class StreamtapeUploader:
             file_paths: List of file paths.
             folder_id: Optional folder ID.
             concurrent: Number of concurrent uploads.
+            delete_after: Delete files after successful upload.
             
         Returns:
             List of result dictionaries.
         """
         folder_id = folder_id or self.default_folder
+        delete_after = delete_after if delete_after is not None else getattr(config, 'DELETE_AFTER_UPLOAD', False)
         semaphore = asyncio.Semaphore(concurrent)
         
         async def _upload_one(fp: str) -> Dict[str, Any]:
             async with semaphore:
-                url = await self.upload(fp, folder_id)
+                url = await self.upload(fp, folder_id, delete_after=delete_after)
                 return {
                     'file': os.path.basename(fp),
                     'status': 'success' if url else 'failed',
