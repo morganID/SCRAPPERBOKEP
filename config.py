@@ -58,3 +58,7 @@ AD_SELECTORS = [
     'iframe[src*="ad"]', 'iframe[src*="click"]',
     'div[onclick]', '[class*="banner"]', '[id*="banner"]',
 ]
+
+STREAMTAPE_LOGIN = "03180fa90a4113de396a"      # ← Ganti
+STREAMTAPE_KEY = "RX032YQkbdSdvv4"      # ← Ganti
+CONCURRENT_UPLOAD = 3
