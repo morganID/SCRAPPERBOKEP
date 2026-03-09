@@ -1,314 +1,823 @@
 """
 Adapter Scout - Analyze website and generate adapter code automatically.
+
+Usage:
+    async with AdapterScout() as scout:
+        result = await scout.analyze("https://example.com/video")
+        print_report(result)
+        code = generate_adapter_code(result)
 """
 
 import asyncio
 import logging
+import re
+from dataclasses import dataclass, field
+from typing import Optional, List, Set
 from urllib.parse import urlparse
-from typing import Optional, Dict, List
 
-from playwright.async_api import async_playwright
+from playwright.async_api import (
+    async_playwright,
+    Page,
+    Request,
+    Response,
+    Playwright,
+    Browser,
+    BrowserContext,
+)
 
 import config
 
 logger = logging.getLogger(__name__)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Constants
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STREAM_EXTENSIONS = (".m3u8", ".mpd", ".mp4", ".ts", ".webm", ".flv")
+
+STREAM_URL_KEYWORDS = (
+    "/playlist", "/manifest", "/chunk", "/segment",
+    "master.m3u8", "index.m3u8", "/hls/", "/dash/",
+)
+
+STREAM_CONTENT_TYPES = (
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "application/dash+xml",
+    "video/mp2t",
+    "video/mp4",
+    "video/webm",
+)
+
+VIDEO_EMBED_KEYWORDS = (
+    "youtube", "vimeo", "dailymotion", "streamtape",
+    "doodstream", "vidoza", "mixdrop", "filemoon",
+    "streamwish", "vidhide", "embed", "player",
+    "streamsb", "upstream", "mp4upload",
+    "/e/", "/v/",
+)
+
+# (selector, type, confidence)
+TITLE_CANDIDATES = [
+    ("meta[property='og:title']",  "meta", 10),
+    ("h1",                         "text",  9),
+    (".video-title",               "text",  8),
+    (".entry-title",               "text",  7),
+    ("meta[name='title']",         "meta",  6),
+    ("h2",                         "text",  5),
+    (".title",                     "text",  4),
+    ("[class*='title']",           "text",  3),
+]
+
+# (selector, confidence)
+PLAY_CANDIDATES = [
+    (".jw-icon-playback",    10),
+    (".vjs-big-play-button", 10),
+    (".plyr__control--play", 9),
+    ("button.play",           8),
+    ("#playbutton",           8),
+    (".play-button",          7),
+    (".btn-play",             7),
+    ("[class*='play']",       4),
+    (".video-player button",  3),
+]
+
+# category -> selectors
+AD_CANDIDATES = {
+    "ad": [
+        ".ads", ".ad", ".advertisement", "#ads",
+        "[class*='ads-']", "[class*='ad-container']",
+        "[id*='ads']", "[id*='banner']",
+        "ins.adsbygoogle", "[id*='google_ads']",
+        "iframe[src*='doubleclick']",
+        "iframe[src*='googlesyndication']",
+    ],
+    "popup": [
+        ".popup", ".modal", ".overlay",
+        "[class*='popup']", "[class*='overlay']",
+        "[class*='modal']",
+    ],
+    "close_button": [
+        ".close-btn", ".dismiss",
+        "[aria-label='Close']",
+        "button[class*='close']",
+        ".close",
+        "[class*='close']",
+    ],
+    "anti_adblock": [
+        "[class*='adblock']", "[id*='adblock']",
+    ],
+}
+
+NAVIGATION_STRATEGIES = ("domcontentloaded", "load", "commit")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Data Classes
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+@dataclass
+class SelectorMatch:
+    """A matched CSS selector with metadata."""
+    selector: str
+    value: Optional[str] = None
+    tag: Optional[str] = None
+    confidence: int = 1
+    category: Optional[str] = None
+    count: int = 1
+    visible: int = 0
+
+
+@dataclass
+class VideoElement:
+    """A detected video/iframe element."""
+    selector: str
+    src: Optional[str] = None
+    tag: str = ""
+    location: str = "main_page"
+    is_video_embed: bool = False
+    dimensions: Optional[str] = None
+    poster: Optional[str] = None
+    src_type: Optional[str] = None
+
+
+@dataclass
+class CapturedStream:
+    """A network-captured stream URL."""
+    url: str
+    content_type: str = ""
+    status: int = 0
+    stream_type: str = "UNKNOWN"
+    is_master: bool = False
+    is_media: bool = False
+
+
+@dataclass
+class AnalysisResult:
+    """Complete analysis result for a URL."""
+    url: str
+    domain: str
+    page_title: str = ""
+    titles: List[SelectorMatch] = field(default_factory=list)
+    play_buttons: List[SelectorMatch] = field(default_factory=list)
+    videos: List[VideoElement] = field(default_factory=list)
+    ads: List[SelectorMatch] = field(default_factory=list)
+    streams: List[CapturedStream] = field(default_factory=list)
+    total_requests: int = 0
+    error: Optional[str] = None
+
+    # ── Convenience properties ──
+
+    @property
+    def best_title_selector(self) -> Optional[str]:
+        return self.titles[0].selector if self.titles else None
+
+    @property
+    def best_play_selector(self) -> Optional[str]:
+        return self.play_buttons[0].selector if self.play_buttons else None
+
+    @property
+    def close_selectors(self) -> List[str]:
+        return [
+            a.selector for a in self.ads
+            if a.category == "close_button" and a.visible > 0
+        ]
+
+    @property
+    def popup_selectors(self) -> List[str]:
+        return [
+            a.selector for a in self.ads
+            if a.category == "popup" and a.visible > 0
+        ]
+
+    @property
+    def stream_types(self) -> Set[str]:
+        return {s.stream_type for s in self.streams}
+
+    @property
+    def master_playlist_url(self) -> Optional[str]:
+        for s in self.streams:
+            if s.is_master:
+                return s.url
+        return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AdapterScout
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 class AdapterScout:
     """
-    Analyze a video website and suggest selectors for adapter.
-    
+    Analyze a video website to discover selectors and stream URLs,
+    then generate adapter code for the domain.
+
     Usage:
-        scout = AdapterScout()
-        analysis = await scout.analyze("https://example.com/video")
-        print(analysis)
+        async with AdapterScout() as scout:
+            result = await scout.analyze("https://example.com/video")
     """
-    
+
     def __init__(self):
-        self.browser = None
-        self.context = None
-        self.page = None
-    
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._context: Optional[BrowserContext] = None
+        self._page: Optional[Page] = None
+        self._streams: List[CapturedStream] = []
+        self._seen_urls: Set[str] = set()
+        self._request_count: int = 0
+
+    # ── Context Manager ──
+
     async def __aenter__(self):
-        await self.start()
+        await self._start()
         return self
-    
+
     async def __aexit__(self, *args):
-        await self.close()
-    
-    async def start(self):
-        """Start browser."""
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
+        await self._close()
+
+    async def _start(self):
+        """Launch browser and set up network interception."""
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(
             headless=True,
             args=config.BROWSER_ARGS,
         )
-        self.context = await self.browser.new_context(
+        self._context = await self._browser.new_context(
             viewport=config.VIEWPORT,
             user_agent=config.USER_AGENT,
         )
-        self.page = await self.context.new_page()
-        # Set longer timeout
-        self.page.set_default_timeout(60000)
-    
-    async def close(self):
-        """Close browser."""
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
-    
-    async def analyze(self, url: str) -> Dict:
-        """
-        Analyze a URL and return suggested selectors.
-        
-        Returns:
-            Dict with analysis results
-        """
-        print(f"\n🔍 Analyzing: {url}")
-        
-        # Navigate
-        print("   Loading page...")
+        self._page = await self._context.new_page()
+        self._page.set_default_timeout(60_000)
+
+        # Attach network listeners
+        self._page.on("request", self._on_request)
+        self._page.on("response", self._on_response)
+
+    async def _close(self):
+        """Shut down browser gracefully."""
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+
+    # ── Network Interception ──
+
+    def _on_request(self, request: Request) -> None:
+        self._request_count += 1
+
+    async def _on_response(self, response: Response) -> None:
+        """Inspect every response for stream URLs."""
         try:
-            await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        except Exception as e:
-            print(f"   ⚠️ Page load issue: {e}")
-            print("   Trying with networkidle...")
-            try:
-                await self.page.goto(url, wait_until="load", timeout=60000)
-            except Exception as e2:
-                print(f"   ❌ Failed to load: {e2}")
-                return {"error": str(e2)}
-        
+            url = response.url
+            if url in self._seen_urls:
+                return
+
+            content_type = response.headers.get("content-type", "")
+            if not self._is_stream(url, content_type):
+                return
+
+            self._seen_urls.add(url)
+
+            stream = CapturedStream(
+                url=url,
+                content_type=content_type,
+                status=response.status,
+                stream_type=self._classify_stream(url, content_type),
+            )
+
+            # Peek inside m3u8 to detect master vs media playlist
+            if ".m3u8" in url.lower():
+                try:
+                    body = await response.text()
+                    stream.is_master = "#EXT-X-STREAM-INF" in body
+                    stream.is_media = "#EXTINF" in body
+                except Exception:
+                    pass
+
+            self._streams.append(stream)
+            logger.info("Stream captured: [%s] %s", stream.stream_type, url[:80])
+
+        except Exception as exc:
+            logger.debug("Response handler error: %s", exc)
+
+    # ── Stream Helpers ──
+
+    @staticmethod
+    def _is_stream(url: str, content_type: str) -> bool:
+        """Check whether a URL/content-type looks like a stream."""
+        low = url.lower()
+        has_ext = any(
+            low.endswith(ext) or f"{ext}?" in low
+            for ext in STREAM_EXTENSIONS
+        )
+        has_kw = any(kw in low for kw in STREAM_URL_KEYWORDS)
+        has_ct = any(ct in content_type for ct in STREAM_CONTENT_TYPES)
+        return has_ext or has_kw or has_ct
+
+    @staticmethod
+    def _classify_stream(url: str, content_type: str) -> str:
+        """Return HLS / DASH / MP4 / TS_SEGMENT / WEBM / UNKNOWN."""
+        low = url.lower()
+        if ".m3u8" in low or "mpegurl" in content_type:
+            return "HLS"
+        if ".mpd" in low or "dash" in content_type:
+            return "DASH"
+        if ".mp4" in low and "video" in content_type:
+            return "MP4"
+        if ".ts" in low:
+            return "TS_SEGMENT"
+        if ".webm" in low:
+            return "WEBM"
+        return "UNKNOWN"
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Main Analysis Pipeline
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def analyze(self, url: str) -> AnalysisResult:
+        """
+        Full analysis pipeline:
+        1. Navigate
+        2. Detect selectors (title, play, ads)
+        3. Dismiss ads
+        4. Click play → trigger stream loading
+        5. Collect video elements & captured streams
+        """
+        self._reset()
+
+        result = AnalysisResult(url=url, domain=urlparse(url).netloc)
+
+        # Step 1 — Navigate
+        logger.info("Analyzing: %s", url)
+        if not await self._navigate(url):
+            result.error = "Failed to load page"
+            return result
+
         await asyncio.sleep(2)
-        
-        analysis = {
-            "url": url,
-            "domain": urlparse(url).netloc,
-            "title_selectors": await self._find_title_selectors(),
-            "play_selectors": await self._find_play_selectors(),
-            "video_selectors": await self._find_video_selectors(),
-            "ad_selectors": await self._find_ad_selectors(),
-            "page_title": await self.page.title(),
-        }
-        
-        return analysis
-    
-    async def _find_title_selectors(self) -> List[Dict]:
-        """Find potential title elements."""
-        selectors = [
-            "h1", "h2", 
-            ".title", ".video-title", ".entry-title",
-            "[class*='title']",
-            "meta[property='og:title']",
-            "meta[name='title']"
-        ]
-        
-        results = []
-        for sel in selectors:
+        result.page_title = await self._page.title()
+
+        # Step 2 — Discover selectors
+        result.titles = await self._find_titles()
+        result.play_buttons = await self._find_play_buttons()
+        result.ads = await self._find_ads()
+
+        # Step 3 — Dismiss ads/popups
+        await self._dismiss_ads(result.ads)
+        await asyncio.sleep(1)
+
+        # Step 4 — Click play to trigger streams
+        clicked = await self._try_play(result.play_buttons)
+        if clicked:
+            await asyncio.sleep(5)  # let the player buffer
+        else:
+            await asyncio.sleep(2)
+
+        # Step 5 — Collect results
+        result.videos = await self._find_videos()
+        result.streams = list(self._streams)
+        result.total_requests = self._request_count
+
+        return result
+
+    def _reset(self) -> None:
+        """Clear state between runs."""
+        self._streams.clear()
+        self._seen_urls.clear()
+        self._request_count = 0
+
+    async def _navigate(self, url: str) -> bool:
+        """Try multiple wait strategies until one succeeds."""
+        for strategy in NAVIGATION_STRATEGIES:
             try:
-                el = await self.page.query_selector(sel)
-                if el:
-                    text = await el.inner_text() if sel != "meta[property='og:title']" else (await el.get_attribute("content"))
-                    if text:
-                        results.append({
-                            "selector": sel,
-                            "value": text[:50] if text else None,
-                            "confidence": self._get_confidence(sel, "title")
-                        })
-            except:
-                continue
-        
-        return sorted(results, key=lambda x: x["confidence"], reverse=True)
-    
-    async def _find_play_selectors(self) -> List[Dict]:
-        """Find potential play button elements."""
-        selectors = [
-            "button.play",
-            ".play-button",
-            "#playbutton",
-            ".btn-play",
-            "[class*='play']",
-            "video + *",
-            ".video-player button",
-            ".jw-play-button",
-            ".vjs-play-button"
-        ]
-        
-        results = []
-        for sel in selectors:
+                await self._page.goto(
+                    url, wait_until=strategy, timeout=60_000,
+                )
+                logger.info("Loaded with strategy=%s", strategy)
+                return True
+            except Exception as exc:
+                logger.warning("Navigation (%s) failed: %s", strategy, exc)
+        return False
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Selector Finders
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def _find_titles(self) -> List[SelectorMatch]:
+        """Find candidate title selectors, sorted by confidence."""
+        results: List[SelectorMatch] = []
+
+        for selector, sel_type, confidence in TITLE_CANDIDATES:
             try:
-                el = await self.page.query_selector(sel)
-                if el:
-                    tag = await el.evaluate("e => e.tagName")
-                    results.append({
-                        "selector": sel,
-                        "tag": tag,
-                        "confidence": self._get_confidence(sel, "play")
-                    })
-            except:
+                el = await self._page.query_selector(selector)
+                if not el:
+                    continue
+
+                value = (
+                    await el.get_attribute("content")
+                    if sel_type == "meta"
+                    else await el.inner_text()
+                )
+
+                if value and value.strip():
+                    results.append(SelectorMatch(
+                        selector=selector,
+                        value=value.strip()[:80],
+                        confidence=confidence,
+                    ))
+            except Exception:
                 continue
-        
-        return sorted(results, key=lambda x: x["confidence"], reverse=True)
-    
-    async def _find_video_selectors(self) -> List[Dict]:
-        """Find video elements."""
-        selectors = ["video", "iframe"]
-        
-        results = []
-        for sel in selectors:
-            try:
-                elements = await self.page.query_selector_all(sel)
-                for el in elements:
-                    src = await el.get_attribute("src")
-                    results.append({
-                        "selector": sel,
-                        "src": src[:50] if src else None,
-                        "tag": sel
-                    })
-            except:
-                continue
-        
+
+        results.sort(key=lambda m: m.confidence, reverse=True)
         return results
-    
-    async def _find_ad_selectors(self) -> List[Dict]:
-        """Find potential ad/popup elements."""
-        selectors = [
-            ".ads", ".ad", ".advertisement",
-            ".popup", ".modal", ".overlay",
-            "[class*='ads']", "[class*='popup']",
-            ".close", "[class*='close']"
-        ]
-        
-        results = []
-        for sel in selectors:
+
+    async def _find_play_buttons(self) -> List[SelectorMatch]:
+        """Find candidate play-button selectors, sorted by confidence."""
+        results: List[SelectorMatch] = []
+
+        for selector, confidence in PLAY_CANDIDATES:
             try:
-                elements = await self.page.query_selector_all(sel)
-                if elements:
-                    count = len(elements)
-                    results.append({
-                        "selector": sel,
-                        "count": count,
-                        "visible": await self._count_visible(sel)
-                    })
-            except:
+                el = await self._page.query_selector(selector)
+                if not el:
+                    continue
+
+                tag = await el.evaluate("e => e.tagName")
+                is_visible = await el.is_visible()
+
+                results.append(SelectorMatch(
+                    selector=selector,
+                    tag=tag,
+                    confidence=confidence if is_visible else confidence // 2,
+                    visible=1 if is_visible else 0,
+                ))
+            except Exception:
                 continue
-        
+
+        results.sort(key=lambda m: m.confidence, reverse=True)
         return results
-    
+
+    async def _find_ads(self) -> List[SelectorMatch]:
+        """Find ad / popup / close-button selectors."""
+        results: List[SelectorMatch] = []
+
+        for category, selectors in AD_CANDIDATES.items():
+            for selector in selectors:
+                try:
+                    elements = await self._page.query_selector_all(selector)
+                    if not elements:
+                        continue
+
+                    results.append(SelectorMatch(
+                        selector=selector,
+                        category=category,
+                        count=len(elements),
+                        visible=await self._count_visible(selector),
+                    ))
+                except Exception:
+                    continue
+
+        return results
+
+    async def _find_videos(self) -> List[VideoElement]:
+        """Find <video>, <source>, and <iframe> elements."""
+        results: List[VideoElement] = []
+
+        # Direct <video>
+        for el in await self._page.query_selector_all("video"):
+            try:
+                results.append(VideoElement(
+                    selector="video",
+                    src=await self._attr(el, "src"),
+                    poster=await self._attr(el, "poster"),
+                    tag="video",
+                ))
+            except Exception:
+                continue
+
+        # <video> > <source>
+        for el in await self._page.query_selector_all("video source"):
+            try:
+                results.append(VideoElement(
+                    selector="video > source",
+                    src=await self._attr(el, "src"),
+                    src_type=await el.get_attribute("type"),
+                    tag="source",
+                ))
+            except Exception:
+                continue
+
+        # <iframe>
+        iframes = await self._page.query_selector_all("iframe")
+        for idx, iframe in enumerate(iframes):
+            try:
+                src = await self._attr(iframe, "src", max_len=150)
+                width = await iframe.get_attribute("width")
+                height = await iframe.get_attribute("height")
+
+                is_embed = bool(
+                    src
+                    and any(kw in src.lower() for kw in VIDEO_EMBED_KEYWORDS)
+                )
+
+                results.append(VideoElement(
+                    selector=f"iframe:nth-of-type({idx + 1})",
+                    src=src,
+                    tag="iframe",
+                    is_video_embed=is_embed,
+                    dimensions=f"{width}x{height}" if width else None,
+                ))
+
+                # Dive inside iframe when it looks like a video embed
+                if is_embed:
+                    results.extend(
+                        await self._probe_iframe(iframe, src or "")
+                    )
+            except Exception:
+                continue
+
+        return results
+
+    async def _probe_iframe(
+        self, iframe, iframe_src: str,
+    ) -> List[VideoElement]:
+        """Try to find <video> elements inside an iframe."""
+        found: List[VideoElement] = []
+        try:
+            frame = await iframe.content_frame()
+            if not frame:
+                return found
+
+            for vid in await frame.query_selector_all("video"):
+                found.append(VideoElement(
+                    selector="iframe >> video",
+                    src=await self._attr(vid, "src"),
+                    tag="video",
+                    location=f"iframe[{iframe_src[:50]}]",
+                ))
+        except Exception as exc:
+            logger.debug("Cannot access iframe content: %s", exc)
+        return found
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Page Interactions
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    async def _dismiss_ads(self, ads: List[SelectorMatch]) -> None:
+        """Click close buttons and remove popup overlays."""
+        for ad in ads:
+            try:
+                if ad.category == "close_button" and ad.visible > 0:
+                    await self._page.click(ad.selector, timeout=2_000)
+                    await self._page.wait_for_timeout(500)
+                elif ad.category == "popup" and ad.visible > 0:
+                    await self._page.evaluate(
+                        "(sel) => document.querySelectorAll(sel)"
+                        ".forEach(e => e.remove())",
+                        ad.selector,
+                    )
+            except Exception:
+                continue
+
+    async def _try_play(self, buttons: List[SelectorMatch]) -> bool:
+        """Click the best visible play button. Returns True on success."""
+        for btn in buttons[:3]:
+            if not btn.visible:
+                continue
+            try:
+                await self._page.click(btn.selector, timeout=3_000)
+                logger.info("Clicked play: %s", btn.selector)
+                return True
+            except Exception:
+                continue
+        return False
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    #  Utilities
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     async def _count_visible(self, selector: str) -> int:
-        """Count visible elements."""
+        """Count elements matching *selector* that are actually visible."""
         try:
-            return await self.page.evaluate(f"""
-                () => {{
-                    return document.querySelectorAll('{selector}').filter(e => {{
-                        return e.offsetParent !== null;
-                    }}).length;
-                }}
-            """)
-        except:
+            return await self._page.evaluate(
+                """(sel) => Array.from(document.querySelectorAll(sel))
+                            .filter(e => e.offsetParent !== null).length""",
+                selector,
+            )
+        except Exception:
             return 0
-    
-    def _get_confidence(self, selector: str, type: str) -> int:
-        """Get confidence score for selector."""
-        scores = {
-            "title": {
-                "h1": 10,
-                "meta[property='og:title']": 8,
-                ".video-title": 7,
-                ".title": 5,
-            },
-            "play": {
-                ".jw-play-button": 10,
-                ".vjs-play-button": 10,
-                "button.play": 8,
-                "#playbutton": 8,
-                ".play-button": 6,
-            }
-        }
-        return scores.get(type, {}).get(selector, 1)
+
+    @staticmethod
+    async def _attr(
+        el, name: str, max_len: int = 100,
+    ) -> Optional[str]:
+        """Get an attribute value, truncated."""
+        val = await el.get_attribute(name)
+        return val[:max_len] if val else None
 
 
-async def run_scout(url: str):
-    """Run the adapter scout interactively."""
-    print(f"\n{'='*50}")
-    print("🎯 ADAPTER SCOUT - Auto Generate Domain Adapter")
-    print(f"{'='*50}")
-    
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Code Generator
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def generate_adapter_code(result: AnalysisResult) -> str:
+    """
+    Produce a ready-to-save Python adapter file from an AnalysisResult.
+    """
+    domain = result.domain.replace("www.", "")
+    domain_snake = re.sub(r"[^a-zA-Z0-9]", "_", domain)
+    class_name = (
+        "".join(w.capitalize() for w in domain_snake.split("_") if w)
+        + "Adapter"
+    )
+
+    best_title = result.best_title_selector or "h1"
+    best_play = result.best_play_selector
+    close_sels = result.close_selectors[:3]
+    popup_sels = result.popup_selectors[:3]
+    is_meta = best_title.startswith("meta")
+
+    L: List[str] = []          # accumulator
+    a = L.append               # shorthand
+
+    # ── Header ──
+    a('"""')
+    a(f"Adapter for {domain}")
+    a("Auto-generated by AdapterScout")
+    a('"""')
+    a("")
+    a("from typing import Optional")
+    a("from .. import BaseAdapter, AdapterRegistry")
+    a("")
+    a("")
+    a("@AdapterRegistry.register")
+    a(f"class {class_name}(BaseAdapter):")
+    a(f'    """Adapter for {domain}."""')
+    a("")
+    a(f'    DOMAINS = ["{domain}", "www.{domain}"]')
+    if result.stream_types:
+        a(f"    STREAM_TYPES = {sorted(result.stream_types)}")
+    a("")
+
+    # ── before_scrape ──
+    a("    async def before_scrape(self) -> None:")
+    a('        """Prepare page — dismiss ads, click play."""')
+    a("        await self.page.wait_for_timeout(2000)")
+
+    if close_sels or popup_sels:
+        a("")
+        a("        # Dismiss ads / popups")
+        for sel in close_sels:
+            a(f'        await self._safe_click("{sel}")')
+        for sel in popup_sels:
+            a(f'        await self._safe_remove("{sel}")')
+
+    if best_play:
+        a("")
+        a("        # Start playback")
+        a(f'        await self._safe_click("{best_play}")')
+        a("        await self.page.wait_for_timeout(3000)")
+    a("")
+
+    # ── extract_title ──
+    a("    async def extract_title(self) -> Optional[str]:")
+    if is_meta:
+        a(f'        el = await self.page.query_selector("{best_title}")')
+        a("        if el:")
+        a('            return await el.get_attribute("content")')
+        a("        return await self.page.title()")
+    else:
+        a("        return await self.page.evaluate(\"\"\"")
+        a("            () => {")
+        a(f"                const el = document.querySelector('{best_title}');")
+        a("                return el")
+        a("                    ? el.innerText.trim().split('\\n')[0]")
+        a("                    : document.title;")
+        a("            }")
+        a('        """)')
+    a("")
+
+    # ── helpers ──
+    a("    # ── helpers ──")
+    a("")
+    a("    async def _safe_click(self, selector: str) -> bool:")
+    a('        """Click element if it exists and is visible."""')
+    a("        try:")
+    a("            el = await self.page.query_selector(selector)")
+    a("            if el and await el.is_visible():")
+    a("                await el.click()")
+    a("                return True")
+    a("        except Exception:")
+    a("            pass")
+    a("        return False")
+    a("")
+    a("    async def _safe_remove(self, selector: str) -> None:")
+    a('        """Remove matching elements from the DOM."""')
+    a("        try:")
+    a("            await self.page.evaluate(")
+    a('                "(sel) => document.querySelectorAll(sel)"')
+    a('                ".forEach(e => e.remove())",')
+    a("                selector,")
+    a("            )")
+    a("        except Exception:")
+    a("            pass")
+
+    return "\n".join(L)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Console Report
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_CATEGORY_ICONS = {
+    "ad":            "📢",
+    "popup":         "💬",
+    "close_button":  "❎",
+    "anti_adblock":  "🛡️",
+}
+
+
+def print_report(result: AnalysisResult) -> None:
+    """Pretty-print the analysis to stdout."""
+    bar = "=" * 55
+
+    print(f"\n{bar}")
+    print(f"📊  Analysis: {result.domain}")
+    print(bar)
+    print(f"   URL:      {result.url}")
+    print(f"   Title:    {result.page_title[:60]}")
+    print(f"   Requests: {result.total_requests}")
+
+    if result.error:
+        print(f"\n   ❌ Error: {result.error}")
+        return
+
+    # Titles
+    print(f"\n📝 Title selectors ({len(result.titles)}):")
+    for t in result.titles[:3]:
+        print(f'   [{t.confidence:2d}] {t.selector}  →  "{t.value}"')
+
+    # Play buttons
+    print(f"\n▶️  Play buttons ({len(result.play_buttons)}):")
+    for p in result.play_buttons[:3]:
+        icon = "✅" if p.visible else "👻"
+        print(f"   [{p.confidence:2d}] {icon} {p.selector}  <{p.tag}>")
+
+    # Video elements
+    print(f"\n🎬 Video elements ({len(result.videos)}):")
+    for v in result.videos[:5]:
+        embed = " 🔗" if v.is_video_embed else ""
+        print(f"   <{v.tag}>{embed}  src={v.src or 'N/A'}")
+        if v.location != "main_page":
+            print(f"       └─ inside {v.location}")
+
+    # Ads
+    print(f"\n🚫 Ad / popup elements ({len(result.ads)}):")
+    for a in result.ads[:6]:
+        icon = _CATEGORY_ICONS.get(a.category, "❓")
+        print(f"   {icon} {a.selector}: "
+              f"{a.count} total, {a.visible} visible")
+
+    # Streams
+    print(f"\n🎯 Captured streams ({len(result.streams)}):")
+    if result.streams:
+        for s in result.streams:
+            flag = " [MASTER]" if s.is_master else ""
+            print(f"   [{s.stream_type}]{flag} {s.url[:80]}")
+    else:
+        print("   ⚠️  None captured — page may need more interaction")
+
+    print(f"\n{bar}\n")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CLI Entry Point
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def run_scout(url: str) -> AnalysisResult:
+    """Analyze a URL, print a report, and generate adapter code."""
+
+    print(f"\n{'=' * 55}")
+    print("🎯  ADAPTER SCOUT — Auto-Generate Domain Adapter")
+    print(f"{'=' * 55}")
+
     async with AdapterScout() as scout:
-        analysis = await scout.analyze(url)
-        
-        # Display results
-        print(f"\n📊 Analysis Results for {analysis['domain']}")
-        print(f"   Page Title: {analysis['page_title'][:50]}...")
-        
-        print(f"\n📝 Title Selectors:")
-        for item in analysis["title_selectors"][:3]:
-            print(f"   - {item['selector']}: {item['value']}")
-        
-        print(f"\n▶️ Play Button Selectors:")
-        for item in analysis["play_selectors"][:3]:
-            print(f"   - {item['selector']} ({item.get('tag', 'N/A')})")
-        
-        print(f"\n🎬 Video Elements:")
-        for item in analysis["video_selectors"][:3]:
-            print(f"   - {item['selector']}: {item['src']}")
-        
-        print(f"\n🚫 Ad/Popup Elements:")
-        for item in analysis["ad_selectors"][:5]:
-            print(f"   - {item['selector']}: {item.get('count', 0)} found, {item.get('visible', 0)} visible")
-        
-        # Generate adapter code
-        print(f"\n{'='*50}")
-        print("📄 Generated Adapter Code:")
-        print(f"{'='*50}\n")
-        
-        domain_name = analysis["domain"].replace("www.", "").replace(".", "_")
-        
-        best_title = analysis["title_selectors"][0]["selector"] if analysis["title_selectors"] else "h1"
-        best_play = analysis["play_selectors"][0]["selector"] if analysis["play_selectors"] else ".play-button"
-        
-        ad_selectors = [item["selector"] for item in analysis["ad_selectors"][:3]]
-        
-        code = f'''"""
-Adapter for {analysis['domain']}
-Auto-generated by AdapterScout
-"""
+        result = await scout.analyze(url)
 
-from .. import BaseAdapter, AdapterRegistry
-from typing import Optional
+    print_report(result)
 
+    if result.error:
+        return result
 
-@RepositoryRegistry.register
-class {domain_name.title().replace("_", "")}Adapter(BaseAdapter):
-    """Adapter for {analysis['domain']}"""
-    
-    DOMAINS = ["{analysis['domain']}", "www.{analysis['domain']}"]
-    
-    async def extract_title(self) -> Optional[str]:
-        return await self.page.evaluate("""
-            () => {{
-                const el = document.querySelector('{best_title}');
-                return el ? el.innerText.trim().split(/\\\\n/)[0] : null;
-            }}
-        """)
-    
-    async def click_play(self) -> bool:
-        try:
-            await self.page.click('{best_play}')
-            return True
-        except:
-            return False
-    
-    async def before_scrape(self) -> None:
-        # Wait for page to stabilize
-        await self.page.wait_for_timeout(1000)
-'''
-        
-        print(code)
-        
-        print(f"{'='*50}")
-        print(f"💾 Save as: stream_getter/adapters/domains/{domain_name}.py")
-        print(f"{'='*50}")
-        
-        return analysis
+    code = generate_adapter_code(result)
+    domain_file = re.sub(r"[^a-zA-Z0-9]", "_", result.domain.replace("www.", ""))
+
+    print(f"{'=' * 55}")
+    print("📄  Generated Adapter Code:")
+    print(f"{'=' * 55}\n")
+    print(code)
+    print(f"\n{'=' * 55}")
+    print(f"💾  Save as: stream_getter/adapters/domains/{domain_file}.py")
+    print(f"{'=' * 55}\n")
+
+    return result
