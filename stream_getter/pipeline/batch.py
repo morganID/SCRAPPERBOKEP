@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 import config
 from .downloader import download_video, pick_best_url
 from .uploader import upload_to_streamtape
-from ..core.scraper import VideoScraper
+from ..core.stream_getter import VideoScraper
 from ..core.interceptor import NetworkInterceptor
 from ..utils.helpers import sanitize_filename, unique_output
 

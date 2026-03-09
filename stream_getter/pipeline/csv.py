@@ -14,7 +14,7 @@ from .csv_helper import (
     read_csv, save_csv, detect_url_column,
     ensure_columns, get_pending_rows, print_summary,
 )
-from ..core.scraper import VideoScraper
+from ..core.stream_getter import VideoScraper
 from ..utils.helpers import sanitize_filename, unique_output
 
 logger = logging.getLogger(__name__)
