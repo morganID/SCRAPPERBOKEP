@@ -89,6 +89,9 @@ class VideoScraper:
         await self.browser.navigate(url, referer=referer)
         await asyncio.sleep(config.BUFFER_WAIT)
         
+        # Handle ads/popups after page load
+        await adapter.handle_ads()
+        
         # Step 2: Check for M3U8 during initial load
         if self.interceptor.has_m3u8():
             logger.debug("M3U8 found during page load")
@@ -100,6 +103,9 @@ class VideoScraper:
         
         # Step 4: Click play button using adapter's method
         await adapter.click_play()
+        
+        # Handle ads after clicking play
+        await adapter.handle_ads()
         
         # Step 5: Collect all captured URLs
         await asyncio.sleep(config.BUFFER_WAIT)

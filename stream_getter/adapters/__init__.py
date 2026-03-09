@@ -28,10 +28,24 @@ class BaseAdapter(ABC):
     - Extracting title
     - Handling auth/referer
     - Post-processing
+    - Ad/popup handling
     """
     
     # Domain patterns this adapter handles
     DOMAINS: List[str] = []
+    
+    # Common ad selectors (can be overridden per adapter)
+    AD_SELECTORS = [
+        '.ads', '.ad-overlay', '.popup',
+        '[class*="ads"]', '[class*="popup"]',
+        '.modal', '.overlay'
+    ]
+    
+    # Common close button selectors
+    CLOSE_SELECTORS = [
+        '.close', '[class*="close"]', 
+        'button.close', '.btn-close'
+    ]
     
     def __init__(self, page, interceptor):
         self.page = page
@@ -52,6 +66,35 @@ class BaseAdapter(ABC):
     async def click_play(self) -> bool:
         """Click the play button to trigger video loading."""
         pass
+    
+    async def handle_ads(self) -> None:
+        """
+        General ad handling - close popups and overlays.
+        Override in subclass for site-specific ads.
+        """
+        # Try to close common popups
+        for close_sel in self.CLOSE_SELECTORS:
+            try:
+                buttons = await self.page.query_selector_all(close_sel)
+                for btn in buttons:
+                    await btn.click()
+            except:
+                continue
+        
+        # Remove overlay elements
+        for ad_sel in self.AD_SELECTORS:
+            try:
+                await self.page.evaluate(f"""
+                    () => {{
+                        document.querySelectorAll('{ad_sel}').forEach(el => {{
+                            if (el && el.style.display !== 'none') {{
+                                el.style.display = 'none';
+                            }}
+                        }});
+                    }}
+                """)
+            except:
+                continue
     
     async def before_scrape(self) -> None:
         """Hook called before scraping. Override for custom behavior."""
