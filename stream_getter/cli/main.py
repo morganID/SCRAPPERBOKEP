@@ -9,7 +9,7 @@ import sys
 
 import config
 from scraper.pipeline import download_direct, download_video
-from scraper.pipeline import upload_multiple, upload_to_streamtape
+from stream_getter.pipeline import upload_multiple, upload_to_streamtape
 from .parser import create_parser
 from ..core.scraper import VideoScraper
 from ..core.interceptor import NetworkInterceptor

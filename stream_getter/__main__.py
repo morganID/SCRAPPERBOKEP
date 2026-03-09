@@ -7,7 +7,7 @@ Usage:
     python -m scraper --csv data.csv
 """
 
-from scraper.cli import run_cli
+from stream_getter.cli import run_cli
 
 if __name__ == '__main__':
     run_cli()

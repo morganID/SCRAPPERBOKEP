@@ -1,4 +1,4 @@
-# 🎬 Video Scraper
+# 🎬 Stream Getter
 
 Download dan upload video HLS stream ke Streamtape secara otomatis.
 
@@ -26,49 +26,49 @@ bash setup.sh
 ### 1. Single URL
 
 ```bash
-python -m scraper --url "https://example.com/video-page"
+python -m stream_getter --url "https://example.com/video-page"
 ```
 
 ### 2. Langsung Download (Direct M3U8)
 
 ```bash
-python -m scraper --direct "https://example.com/video.m3u8" -o video.mp4
+python -m stream_getter --direct "https://example.com/video.m3u8" -o video.mp4
 ```
 
 ### 3. Batch dari Text File
 
 ```bash
 # Buat file urls.txt dengan 1 URL per baris
-python -m scraper --batch urls.txt -d ./downloads
+python -m stream_getter --batch urls.txt -d ./downloads
 ```
 
 ### 4. CSV Processing (Auto Upload)
 
 ```bash
 # CSV wajib punya kolom 'url'
-python -m scraper --csv hasil.csv --upload
+python -m stream_getter --csv hasil.csv --upload
 
 # Dengan output directory custom
-python -m scraper --csv hasil.csv --upload -d ./downloads
+python -m stream_getter --csv hasil.csv --upload -d ./downloads
 
 # Jika kolom URL namanya bukan 'url'
-python -m scraper --csv hasil.csv --upload --csv-column link
+python -m stream_getter --csv hasil.csv --upload --csv-column link
 ```
 
 ### 5. Upload Saja
 
 ```bash
 # Upload 1 file
-python -m scraper --upload-only video.mp4
+python -m stream_getter --upload-only video.mp4
 
 # Upload semua video di folder
-python -m scraper --upload-only ./folder_video
+python -m stream_getter --upload-only ./folder_video
 ```
 
 ### 6. Debug Mode
 
 ```bash
-python -m scraper --debug "https://example.com/video"
+python -m stream_getter --debug "https://example.com/video"
 ```
 
 ## 📊 Contoh CSV
@@ -125,7 +125,7 @@ DELETE_AFTER_UPLOAD = True   # Hapus file setelah upload
 .
 ├── main.py                  # Entry point
 ├── config.py                # Konfigurasi
-├── scraper/
+├── stream_getter/
 │   ├── __init__.py
 │   ├── cli/                 # Command line interface
 │   │   ├── main.py
@@ -133,7 +133,7 @@ DELETE_AFTER_UPLOAD = True   # Hapus file setelah upload
 │   ├── core/                # Core scraping
 │   │   ├── browser.py
 │   │   ├── interceptor.py
-│   │   └── scraper.py
+│   │   └── stream_getter.py
 │   ├── pipeline/            # Processing pipelines
 │   │   ├── batch.py
 │   │   ├── csv.py
