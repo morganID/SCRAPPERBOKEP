@@ -5,7 +5,7 @@ import logging
 # DEBUG   = semua detail (development)
 # INFO    = info penting saja (production)
 # WARNING = hanya warning & error
-LOG_LEVEL = 'INFO'
+LOG_LEVEL = 'WARNING'
 
 # ── Setup Logger ──
 logging.basicConfig(

@@ -4,8 +4,12 @@ import os
 import re
 import json
 import asyncio
+import logging
 import aiohttp
 import config
+
+# ── Logger ──
+logger = logging.getLogger(__name__)
 
 
 async def upload_to_streamtape(file_path, folder_id=None):
@@ -14,18 +18,15 @@ async def upload_to_streamtape(file_path, folder_id=None):
     Return URL string jika sukses, None jika gagal.
     """
     if not os.path.exists(file_path):
-        print(f"   ❌ File tidak ditemukan: {file_path}")
+        logger.error(f"File not found: {file_path}")
         return None
 
     filename = os.path.basename(file_path)
     file_size = os.path.getsize(file_path) / (1024 * 1024)
     folder_id = folder_id or getattr(config, 'STREAMTAPE_FOLDER', None)
 
-    print(f"\n⬆️  Uploading ke Streamtape...")
-    print(f"   File   : {filename}")
-    print(f"   Size   : {file_size:.1f} MB")
-    if folder_id:
-        print(f"   Folder : {folder_id}")
+    print(f"\n⬆️  Upload: {filename} ({file_size:.1f} MB)")
+    logger.debug(f"Folder: {folder_id or 'root'}")
 
     timeout = aiohttp.ClientTimeout(total=3600)
 
@@ -40,14 +41,19 @@ async def upload_to_streamtape(file_path, folder_id=None):
             if folder_id:
                 api_url += f"&folder={folder_id}"
 
+            logger.debug("Requesting upload URL...")
+
             async with session.get(api_url) as resp:
                 data = await resp.json()
                 if data.get('status') != 200:
-                    print(f"   ❌ API Error: {data.get('msg')}")
+                    logger.error(f"API error: {data.get('msg')}")
                     return None
                 upload_url = data['result']['url']
+                logger.debug(f"Upload URL: {upload_url[:80]}...")
 
             # ── Step 2: Upload file ──
+            logger.debug("Uploading file...")
+
             with open(file_path, 'rb') as f:
                 form = aiohttp.FormData()
                 form.add_field(
@@ -60,19 +66,22 @@ async def upload_to_streamtape(file_path, folder_id=None):
                     content_type = resp.headers.get('Content-Type', '')
                     response_text = await resp.text()
 
+                    logger.debug(f"Response: HTTP {resp.status}, "
+                                 f"Content-Type: {content_type}")
+
                     # ── Try 1: Parse JSON response ──
                     if 'application/json' in content_type:
                         try:
                             result = json.loads(response_text)
                             if result.get('status') == 200:
                                 url = result['result']['url']
-                                print(f"   ✅ Uploaded: {url}")
+                                print(f"   ✅ {url}")
                                 return url
                             else:
-                                print(f"   ❌ Failed: {result.get('msg')}")
+                                logger.error(f"Upload failed: {result.get('msg')}")
                                 return None
                         except (json.JSONDecodeError, KeyError, TypeError):
-                            pass
+                            logger.debug("JSON parse failed, trying regex...")
 
                     # ── Try 2: Regex cari URL streamtape ──
                     match = re.search(
@@ -81,7 +90,7 @@ async def upload_to_streamtape(file_path, folder_id=None):
                     )
                     if match:
                         url = match.group(0)
-                        print(f"   ✅ Uploaded: {url}")
+                        print(f"   ✅ {url}")
                         return url
 
                     # ── Try 3: Regex cari video ID ──
@@ -92,16 +101,16 @@ async def upload_to_streamtape(file_path, folder_id=None):
                     if match:
                         video_id = match.group(1)
                         url = f"https://streamtape.com/v/{video_id}"
-                        print(f"   ✅ Uploaded: {url}")
+                        print(f"   ✅ {url}")
                         return url
 
                     # ── Try 4: HTTP 200 → cek file list ──
                     if resp.status == 200:
-                        print(f"   ⏳ Upload selesai, mencari file...")
+                        logger.info("Upload done, searching file list...")
 
                         for attempt in range(5):
                             await asyncio.sleep(3)
-                            print(f"   🔍 Checking... ({attempt + 1}/5)")
+                            logger.debug(f"Checking file list... ({attempt + 1}/5)")
 
                             found_url = await _find_uploaded_file(
                                 session, filename, folder_id
@@ -109,19 +118,19 @@ async def upload_to_streamtape(file_path, folder_id=None):
                             if found_url:
                                 return found_url
 
-                        print(f"   ⚠️ URL belum tersedia")
-                        print(f"   💡 Cek manual: https://streamtape.com/videos")
+                        logger.warning("File uploaded but URL not found")
+                        logger.warning("Check manually: https://streamtape.com/videos")
                         return None
 
-                    print(f"   ❌ HTTP {resp.status}")
-                    print(f"   Response: {response_text[:300]}")
+                    logger.error(f"HTTP {resp.status}")
+                    logger.debug(f"Response body: {response_text[:300]}")
                     return None
 
         except asyncio.TimeoutError:
-            print(f"   ❌ Timeout (file terlalu besar?)")
+            logger.error(f"Upload timeout: {filename}")
             return None
         except Exception as e:
-            print(f"   ❌ Error: {e}")
+            logger.error(f"Upload error: {e}")
             return None
 
 
@@ -149,13 +158,11 @@ async def _find_uploaded_file(session, filename, folder_id=None):
             if not files:
                 return None
 
-            # Bersihkan filename untuk comparison
             clean_target = re.sub(
                 r'[^a-z0-9]', '',
                 os.path.splitext(filename)[0].lower()
             )
 
-            # Cari file dengan nama yang cocok (terbaru dulu)
             for f in reversed(files):
                 file_name = f.get('name', '')
                 clean_name = re.sub(
@@ -169,13 +176,13 @@ async def _find_uploaded_file(session, filename, folder_id=None):
                     file_id = f.get('linkid')
                     if file_id:
                         url = f"https://streamtape.com/v/{file_id}"
-                        print(f"   ✅ Found: {url}")
+                        print(f"   ✅ {url}")
                         return url
 
             return None
 
     except Exception as e:
-        print(f"   ⚠️ Check error: {e}")
+        logger.warning(f"File list check error: {e}")
         return None
 
 
@@ -193,22 +200,22 @@ async def upload_multiple(file_paths, folder_id=None, concurrent=3):
                 'url': url or ''
             }
 
-    print(f"\n{'='*50}")
-    print(f"🚀 STREAMTAPE UPLOADER")
-    print(f"{'='*50}")
-    print(f"📁 Files      : {len(file_paths)}")
-    print(f"📂 Folder     : {folder_id or 'root'}")
-    print(f"⚡ Concurrent : {concurrent}")
-    print(f"{'='*50}")
+    total = len(file_paths)
+    print(f"\n🚀 Uploading {total} file(s) to Streamtape"
+          f" (folder: {folder_id or 'root'}, concurrent: {concurrent})")
 
     tasks = [_upload_one(fp) for fp in file_paths]
     results = await asyncio.gather(*tasks)
 
     success = sum(1 for r in results if r['status'] == 'success')
+    failed = total - success
 
-    print(f"\n{'='*50}")
-    print(f"📊 SUMMARY: {success}/{len(results)} berhasil")
-    print(f"{'='*50}")
+    print(f"\n📊 Upload done: {success} success, {failed} failed")
+
+    if failed > 0:
+        for r in results:
+            if r['status'] == 'failed':
+                logger.warning(f"Failed: {r['file']}")
 
     return results
 
@@ -228,12 +235,12 @@ async def list_folders():
 
             if data.get('status') == 200:
                 folders = data.get('result', {}).get('folders', [])
-                print("\n📁 Folders:")
+                print(f"\n📁 Folders ({len(folders)}):")
                 for f in folders:
                     print(f"   {f['id']} → {f['name']}")
                 return folders
             else:
-                print(f"❌ Error: {data.get('msg')}")
+                logger.error(f"List folders failed: {data.get('msg')}")
                 return []
 
 
@@ -257,5 +264,5 @@ async def create_folder(name, parent_id=None):
                 print(f"✅ Folder created: {name} (ID: {folder_id})")
                 return folder_id
             else:
-                print(f"❌ Error: {data.get('msg')}")
+                logger.error(f"Create folder failed: {data.get('msg')}")
                 return None
