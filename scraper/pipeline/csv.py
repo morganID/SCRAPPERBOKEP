@@ -65,9 +65,13 @@ class CSVPipeline:
         self._dl_lock = asyncio.Lock()
         self._up_lock = asyncio.Lock()
     
+    def _truncate(self, text: str, length: int = 30) -> str:
+        """Truncate text to specified length."""
+        return text[:length] + '...' if len(text) > length else text
+    
     def _get_status(self) -> str:
         """Get concurrent status string."""
-        return f"⚡ [DL:{self._active_dl}/{self.max_dl}] [UP:{self._active_up}/{self.max_up}]"
+        return f"⚡DL{self._active_dl}/{self.max_dl}|UP{self._active_up}/{self.max_up}"
     
     async def run(self) -> List[Dict[str, Any]]:
         """
@@ -258,7 +262,7 @@ class CSVPipeline:
             async with self._dl_lock:
                 self._active_dl += 1
             status = self._get_status()
-            print(f"{status} 📥 {job['title'][:30]}...")
+            print(f"{status} ↓ {self._truncate(job['title'])}")
             
             success = await asyncio.to_thread(
                 download_video,
@@ -272,7 +276,6 @@ class CSVPipeline:
         
         if not success:
             job['status'] = 'DOWNLOAD_FAILED'
-            print(f"❌ Download failed: {job['title'][:40]}")
             return job
         
         size = os.path.getsize(job['output']) / (1024 * 1024)
@@ -283,7 +286,7 @@ class CSVPipeline:
                 async with self._up_lock:
                     self._active_up += 1
                 status = self._get_status()
-                print(f"{status} 📤 {job['title'][:30]}...")
+                print(f"{status} ↑ {self._truncate(job['title'])}")
                 
                 st_url = await upload_to_streamtape(job['output'])
                 
@@ -293,16 +296,12 @@ class CSVPipeline:
             if st_url:
                 job['streamtape'] = st_url
                 job['status'] = 'OK'
-                print(f"✅ {job['title'][:40]} → {st_url}")
+                print(f"✅ {self._truncate(job['title'], 25)} → {st_url}")
             else:
                 job['status'] = 'UPLOAD_FAILED'
-                print(f"❌ Upload failed: {job['title'][:40]}")
         
         return job
     
     def _print_header(self, seq: int, total: int, row_idx: int, url: str) -> None:
         """Print section header."""
-        print(f"\n{'#' * 60}")
-        print(f"# [{seq}/{total}]  Row #{row_idx + 2}")
-        print(f"# {url}")
-        print(f"{'#' * 60}")
+        print(f"[{seq}/{total}] {self._truncate(url, 40)}")
