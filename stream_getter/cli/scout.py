@@ -48,6 +48,8 @@ class AdapterScout:
             user_agent=config.USER_AGENT,
         )
         self.page = await self.context.new_page()
+        # Set longer timeout
+        self.page.set_default_timeout(60000)
     
     async def close(self):
         """Close browser."""
@@ -66,7 +68,18 @@ class AdapterScout:
         print(f"\n🔍 Analyzing: {url}")
         
         # Navigate
-        await self.page.goto(url, wait_until="domcontentloaded")
+        print("   Loading page...")
+        try:
+            await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            print(f"   ⚠️ Page load issue: {e}")
+            print("   Trying with networkidle...")
+            try:
+                await self.page.goto(url, wait_until="load", timeout=60000)
+            except Exception as e2:
+                print(f"   ❌ Failed to load: {e2}")
+                return {"error": str(e2)}
+        
         await asyncio.sleep(2)
         
         analysis = {
