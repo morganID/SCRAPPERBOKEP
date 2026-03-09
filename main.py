@@ -1,16 +1,6 @@
 #!/usr/bin/env python3
 """
-Video Scraper v2.0 - Concurrent Pipeline
-
-Usage:
-  python main.py --url "https://target-site.com/video"
-  python main.py --url "URL" --output video.mp4 --upload
-  python main.py --direct "https://xxx/index.m3u8"
-  python main.py --batch urls.txt --upload --max-dl 5 --max-up 3
-  python main.py --csv data.csv --upload
-  python main.py --csv data.csv --csv-column link --upload
-  python main.py --upload-only video.mp4
-  python main.py --debug "https://target-site.com/video"
+Video Scraper - Main Entry Point
 """
 
 import asyncio
@@ -18,6 +8,8 @@ import argparse
 import json
 import sys
 import os
+import re
+import logging
 from pathlib import Path
 
 try:
@@ -29,223 +21,497 @@ except ImportError:
 from scraper import VideoScraper
 from downloader import download_video, download_direct, pick_best_url
 from uploader import upload_to_streamtape, upload_multiple
-from pipeline import Pipeline, Job
-from utils import sanitize_filename, get_page_title
 from csv_helper import (
     read_csv, save_csv, detect_url_column,
-    ensure_columns, get_pending_rows, print_summary,
+    ensure_columns, get_pending_rows, print_summary
 )
-import config
+import config  # ini trigger basicConfig di config.py
+
+log = logging.getLogger(__name__)
 
 
-# ═══════════════════════════════════════
-#  SINGLE (no pipeline needed)
-# ═══════════════════════════════════════
+# ========================
+#  HELPER
+# ========================
+
+def sanitize_filename(name):
+    if not name:
+        return "video"
+    name = re.sub(r'[<>:"/\\|?*\n\r\t]', '', name)
+    name = re.sub(r'\s+', ' ', name).strip()
+    name = name.strip('.')
+    name = name[:100]
+    return name if name else "video"
+
+
+async def get_page_title(page):
+    try:
+        title = await page.evaluate("""
+            () => {
+                const h1 = document.querySelector('h1');
+                if (h1 && h1.innerText.trim()) return h1.innerText.trim();
+
+                const vt = document.querySelector('.video-title, .entry-title, .title');
+                if (vt && vt.innerText.trim()) return vt.innerText.trim();
+
+                const og = document.querySelector('meta[property="og:title"]');
+                if (og && og.content) return og.content.trim();
+
+                const title = document.title;
+                if (title) return title.split(/[-|–—]/)[0].trim();
+
+                return null;
+            }
+        """)
+        log.debug(f"Page title: {title}")
+        return title
+    except Exception as e:
+        log.debug(f"Gagal ambil title: {e}")
+        return None
+
+
+def unique_output(filepath):
+    if not os.path.exists(filepath):
+        return filepath
+    base, ext = os.path.splitext(filepath)
+    counter = 1
+    while os.path.exists(f"{base}_{counter}{ext}"):
+        counter += 1
+    return f"{base}_{counter}{ext}"
+
+
+# ========================
+#  SINGLE SCRAPE
+# ========================
 
 async def scrape_single(url, output=None, referer=None, upload=False):
     scraper = VideoScraper()
+
     try:
         await scraper.start_browser()
+        log.info(f"Scraping: {url}")
         m3u8_urls = await scraper.scrape(url)
 
-        if not m3u8_urls:
+        if m3u8_urls:
+            best = pick_best_url(m3u8_urls)
+            log.debug(f"Semua M3U8: {m3u8_urls}")
+            print(f"\n🏆 Best URL: {best}")
+
+            if output:
+                output_file = output
+            else:
+                title = await get_page_title(scraper.page)
+                title = sanitize_filename(title)
+                output_file = f"{title}.mp4"
+                print(f"📝 Judul: {title}")
+
+            log.debug(f"Output: {output_file}")
+            success = download_video(
+                m3u8_url=best,
+                output_file=output_file,
+                referer=referer or config.DEFAULT_REFERER,
+            )
+
+            if success and upload:
+                await upload_to_streamtape(output_file)
+
+        else:
+            log.warning(f"M3U8 tidak ditemukan: {url}")
+            log.debug(f"Captured URLs: {json.dumps(scraper.captured_urls, indent=2, default=str)}")
             print("\n❌ M3U8 tidak ditemukan")
-            print(json.dumps(scraper.captured_urls, indent=2, default=str))
-            return
 
-        best = pick_best_url(m3u8_urls)
-        print(f"\n🏆 Best URL: {best}")
-
-        if not output:
-            title = await get_page_title(scraper.page)
-            output = f"{sanitize_filename(title)}.mp4"
-            print(f"📝 Judul: {title}")
-
-        success = download_video(best, output, referer or config.DEFAULT_REFERER)
-
-        if success and upload:
-            await upload_to_streamtape(output)
     finally:
         await scraper.close()
 
 
-# ═══════════════════════════════════════
-#  BATCH
-# ═══════════════════════════════════════
+# ========================
+#  CONCURRENT DOWNLOAD + UPLOAD
+# ========================
 
-def _print_job_summary(jobs):
-    print(f"\n{'='*60}")
-    print(f"📊 SUMMARY")
+async def download_and_upload(job, sem_dl, sem_up, referer, upload):
+    async with sem_dl:
+        log.info(f"Downloading: {job['title'][:40]}")
+        log.debug(f"M3U8: {job['m3u8']}")
+        log.debug(f"Output: {job['output']}")
+
+        success = await asyncio.to_thread(
+            download_video,
+            m3u8_url=job['m3u8'],
+            output_file=job['output'],
+            referer=referer,
+        )
+
+    if not success:
+        job['status'] = 'DOWNLOAD_FAILED'
+        log.warning(f"Download gagal: {job['title'][:40]}")
+        return job
+
+    sz = os.path.getsize(job['output']) / (1024 * 1024)
+    print(f"✅ Downloaded: {job['title'][:40]} ({sz:.1f} MB)")
+    log.info(f"Downloaded: {job['title'][:40]} ({sz:.1f} MB)")
+    job['status'] = 'DOWNLOADED'
+
+    if upload:
+        async with sem_up:
+            log.info(f"Uploading: {job['title'][:40]}")
+            st_url = await upload_to_streamtape(job['output'])
+
+        if st_url:
+            job['streamtape'] = st_url
+            job['status'] = 'OK'
+            print(f"📺 {st_url}")
+            log.info(f"Uploaded: {st_url}")
+        else:
+            job['status'] = 'UPLOAD_FAILED'
+            log.warning(f"Upload gagal: {job['title'][:40]}")
+
+    return job
+
+
+# ========================
+#  BATCH SCRAPE
+# ========================
+
+async def scrape_batch(urls, output_dir='.', referer=None, upload=False):
+    scraper = VideoScraper()
+    jobs = []
+    tasks = []
+
+    max_dl = getattr(config, 'MAX_CONCURRENT_DOWNLOADS', 3)
+    max_up = getattr(config, 'MAX_CONCURRENT_UPLOADS', 2)
+    sem_dl = asyncio.Semaphore(max_dl)
+    sem_up = asyncio.Semaphore(max_up)
+    ref = referer or config.DEFAULT_REFERER
+
+    valid_urls = [u.strip() for u in urls if u.strip() and not u.startswith('#')]
+    total = len(valid_urls)
+
+    print(f"⚡ Concurrent: download(×{max_dl}), upload(×{max_up})")
+    log.info(f"Batch: {total} URLs")
+
+    try:
+        await scraper.start_browser()
+
+        for i, url in enumerate(valid_urls, 1):
+            print(f"\n{'#'*60}")
+            print(f"# VIDEO {i}/{total}")
+            print(f"# {url}")
+            print(f"{'#'*60}")
+
+            log.info(f"[{i}/{total}] Scraping: {url}")
+            scraper.reset()
+
+            try:
+                m3u8_urls = await scraper.scrape(url)
+
+                if not m3u8_urls:
+                    log.warning(f"[{i}/{total}] M3U8 tidak ditemukan")
+                    log.debug(f"Captured: {scraper.captured_urls}")
+                    print("❌ M3U8 tidak ditemukan")
+                    jobs.append({'url': url, 'title': '', 'status': 'NO_M3U8'})
+                    continue
+
+                best = pick_best_url(m3u8_urls)
+                title = await get_page_title(scraper.page)
+                title = sanitize_filename(title) or f"video_{i}"
+                output = unique_output(os.path.join(output_dir, f"{title}.mp4"))
+
+                print(f"📝 Judul: {title}")
+                print(f"🏆 Best: {best}")
+                log.debug(f"[{i}/{total}] Semua M3U8: {m3u8_urls}")
+                log.debug(f"[{i}/{total}] Output: {output}")
+
+                job = {
+                    'url': url,
+                    'title': title,
+                    'm3u8': best,
+                    'output': output,
+                    'status': 'QUEUED',
+                    'streamtape': '',
+                }
+                jobs.append(job)
+
+                task = asyncio.create_task(
+                    download_and_upload(job, sem_dl, sem_up, ref, upload)
+                )
+                tasks.append(task)
+
+            except Exception as e:
+                log.error(f"[{i}/{total}] Scrape error: {e}", exc_info=True)
+                print(f"❌ Error: {e}")
+                jobs.append({'url': url, 'title': '', 'status': f'ERROR: {e}'})
+
+            await asyncio.sleep(3)
+
+    finally:
+        await scraper.close()
+
+    if tasks:
+        print(f"\n⏳ Menunggu {len(tasks)} download/upload selesai...")
+        await asyncio.gather(*tasks)
+
+    # Summary
+    print(f"\n\n{'='*60}")
+    print(f"📊 BATCH SUMMARY")
     print(f"{'='*60}")
-    counts = {}
     for j in jobs:
-        icon = '✅' if j.status == 'OK' else ('⬇️' if j.status == 'DOWNLOADED' else '❌')
-        label = j.title[:40] or j.url[:40]
-        print(f"  {icon} {label}  [{j.status}]")
-        if j.streamtape:
-            print(f"     📺 {j.streamtape}")
-        counts[j.status] = counts.get(j.status, 0) + 1
-    print(f"\n  {counts}")
+        st = j.get('status', '')
+        icon = "✅" if st == 'OK' else ("⬇️" if st == 'DOWNLOADED' else "❌")
+        print(f"  {icon} {j.get('title','')[:40] or j['url'][:40]}")
+        print(f"     Status: {st}")
+        if j.get('streamtape'):
+            print(f"     📺 {j['streamtape']}")
 
+    ok = sum(1 for j in jobs if j['status'] == 'OK')
+    dl = sum(1 for j in jobs if j['status'] == 'DOWNLOADED')
+    fail = sum(1 for j in jobs if j['status'] not in ('OK', 'DOWNLOADED'))
+    print(f"\n  ✅ OK: {ok}  ⬇️ Downloaded: {dl}  ❌ Failed: {fail}")
+    log.info(f"Batch done: OK={ok}, Downloaded={dl}, Failed={fail}")
 
-async def scrape_batch(urls, output_dir='.', referer=None, upload=False,
-                       max_dl=None, max_up=None):
-    valid = [u.strip() for u in urls if u.strip() and not u.startswith('#')]
-    jobs = [Job(url=u, id=i) for i, u in enumerate(valid)]
-
-    pipe = Pipeline(
-        max_dl=max_dl or config.MAX_CONCURRENT_DOWNLOADS,
-        max_up=max_up or config.MAX_CONCURRENT_UPLOADS,
-        referer=referer,
-        upload=upload,
-        output_dir=output_dir,
-    )
-    await pipe.run(jobs)
-    _print_job_summary(jobs)
     return jobs
 
 
-# ═══════════════════════════════════════
-#  CSV  (on_update saves CSV every time)
-# ═══════════════════════════════════════
+# ========================
+#  CSV SCRAPE
+# ========================
 
 async def scrape_csv(csv_file, url_column='url', output_dir='.',
-                     referer=None, upload=False,
-                     max_dl=None, max_up=None):
+                     referer=None, upload=False):
 
     if not os.path.exists(csv_file):
+        log.error(f"File tidak ditemukan: {csv_file}")
         print(f"❌ File tidak ditemukan: {csv_file}")
         return
 
     fieldnames, rows = read_csv(csv_file)
     if not fieldnames:
-        print("❌ CSV kosong / format tidak valid!")
+        log.error("CSV kosong atau format tidak valid!")
+        print("❌ CSV kosong atau format tidak valid!")
         return
 
-    print(f"📄 CSV: {csv_file}  ({len(rows)} baris)")
+    print(f"📄 CSV: {csv_file}")
+    print(f"   Kolom: {fieldnames}")
+    print(f"   Baris: {len(rows)}")
+    log.debug(f"CSV fieldnames: {fieldnames}")
 
     detected = detect_url_column(fieldnames, preferred=url_column)
     if not detected:
-        print(f"❌ Kolom URL '{url_column}' tidak ditemukan!  Tersedia: {fieldnames}")
+        log.error(f"Kolom URL '{url_column}' tidak ditemukan! Tersedia: {fieldnames}")
+        print(f"\n❌ Kolom URL tidak ditemukan!")
+        print(f"   Cari: '{url_column}'")
+        print(f"   Tersedia: {fieldnames}")
+        print(f"   Gunakan --csv-column NAMA_KOLOM")
         return
     url_column = detected
-    ensure_columns(fieldnames)
+    print(f"   Kolom URL: '{url_column}'")
+
+    added = ensure_columns(fieldnames)
+    if added:
+        log.debug(f"Kolom baru: {added}")
+        print(f"   ➕ Kolom baru: {added}")
 
     to_process = get_pending_rows(rows, url_column=url_column)
     skipped = len(rows) - len(to_process)
-    if skipped:
-        print(f"   ⏭️  Skip {skipped} baris (sudah OK)")
+
+    if skipped > 0:
+        print(f"   ⏭️  Skip {skipped} baris (sudah ada streamtape)")
+
     if not to_process:
-        print("✅ Semua sudah selesai!")
+        print("\n✅ Semua baris sudah punya link streamtape!")
         return
 
-    # Build jobs → id = row index
-    jobs = []
-    for idx in to_process:
-        row = rows[idx]
-        jobs.append(Job(
-            url=row[url_column].strip(),
-            id=idx,
-            title=row.get('title', '').strip(),
-        ))
+    print(f"   🎯 Akan proses: {len(to_process)} video")
 
-    # Callback: setiap status berubah → sync update row + save CSV
-    def on_update(job: Job):
-        row = rows[job.id]
-        row['status'] = job.status
-        if job.title:
-            row['title'] = row.get('title', '').strip() or job.title
-        if job.streamtape:
-            row['streamtape'] = job.streamtape
-        save_csv(csv_file, fieldnames, rows)
+    os.makedirs(output_dir, exist_ok=True)
 
-    pipe = Pipeline(
-        max_dl=max_dl or config.MAX_CONCURRENT_DOWNLOADS,
-        max_up=max_up or config.MAX_CONCURRENT_UPLOADS,
-        referer=referer,
-        upload=upload,
-        output_dir=output_dir,
-    )
-    await pipe.run(jobs, on_update=on_update)
+    max_dl = getattr(config, 'MAX_CONCURRENT_DOWNLOADS', 3)
+    max_up = getattr(config, 'MAX_CONCURRENT_UPLOADS', 2)
+    sem_dl = asyncio.Semaphore(max_dl)
+    sem_up = asyncio.Semaphore(max_up)
+    csv_lock = asyncio.Lock()
+    ref = referer or config.DEFAULT_REFERER
+
+    print(f"   ⚡ Concurrent: download(×{max_dl}), upload(×{max_up})")
+    log.info(f"CSV: {len(to_process)} video, dl×{max_dl}, up×{max_up}")
+
+    async def process_and_save(job, row_idx):
+        await download_and_upload(job, sem_dl, sem_up, ref, upload)
+
+        async with csv_lock:
+            row = rows[row_idx]
+            row['status'] = job['status']
+            if job.get('title'):
+                row['title'] = row.get('title', '').strip() or job['title']
+            if job.get('streamtape'):
+                row['streamtape'] = job['streamtape']
+            save_csv(csv_file, fieldnames, rows)
+            log.debug(f"CSV saved (baris #{row_idx + 2}, status={job['status']})")
+            print(f"💾 CSV updated (baris #{row_idx + 2})")
+
+    scraper = VideoScraper()
+    tasks = []
+
+    try:
+        await scraper.start_browser()
+
+        for seq, idx in enumerate(to_process, 1):
+            row = rows[idx]
+            url = row[url_column].strip()
+
+            print(f"\n{'#'*60}")
+            print(f"# [{seq}/{len(to_process)}]  Baris CSV #{idx + 2}")
+            print(f"# {url}")
+            print(f"{'#'*60}")
+
+            log.info(f"[{seq}/{len(to_process)}] Scraping baris #{idx + 2}")
+            scraper.reset()
+
+            try:
+                m3u8_urls = await scraper.scrape(url)
+
+                if not m3u8_urls:
+                    log.warning(f"[{seq}] M3U8 tidak ditemukan")
+                    print("❌ M3U8 tidak ditemukan")
+                    row['status'] = 'NO_M3U8'
+                    save_csv(csv_file, fieldnames, rows)
+                    await asyncio.sleep(2)
+                    continue
+
+                best = pick_best_url(m3u8_urls)
+                title = await get_page_title(scraper.page)
+                title = sanitize_filename(title) or f"video_{idx + 1}"
+                row['title'] = row.get('title', '').strip() or title
+                output = unique_output(
+                    os.path.join(output_dir, f"{sanitize_filename(row['title'])}.mp4")
+                )
+
+                print(f"📝 Judul: {row['title']}")
+                print(f"🏆 Best: {best}")
+                log.debug(f"[{seq}] M3U8: {best}")
+                log.debug(f"[{seq}] Output: {output}")
+
+                job = {
+                    'url': url,
+                    'title': row['title'],
+                    'm3u8': best,
+                    'output': output,
+                    'status': 'QUEUED',
+                    'streamtape': '',
+                }
+
+                task = asyncio.create_task(process_and_save(job, idx))
+                tasks.append(task)
+
+            except Exception as e:
+                log.error(f"[{seq}] Error: {e}", exc_info=True)
+                print(f"❌ Error: {e}")
+                row['status'] = f'ERROR: {str(e)[:80]}'
+                save_csv(csv_file, fieldnames, rows)
+
+            await asyncio.sleep(3)
+
+    finally:
+        await scraper.close()
+
+    if tasks:
+        print(f"\n⏳ Menunggu {len(tasks)} download/upload selesai...")
+        await asyncio.gather(*tasks)
 
     save_csv(csv_file, fieldnames, rows)
-    print(f"\n{'='*60}")
+
+    print(f"\n\n{'='*60}")
     print(f"📊 CSV SUMMARY — {csv_file}")
     print(f"{'='*60}")
     print_summary(rows, skipped=skipped)
-    print(f"💾 Saved: {csv_file}")
+    print(f"\n💾 CSV saved: {csv_file}")
+    log.info(f"CSV done: {csv_file}")
+
     return rows
 
 
-# ═══════════════════════════════════════
+# ========================
 #  UPLOAD ONLY
-# ═══════════════════════════════════════
+# ========================
 
 async def upload_only(path):
     path = Path(path)
-    exts = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv'}
+    video_ext = ['.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv']
 
     if not path.exists():
+        log.error(f"Path tidak ditemukan: {path}")
         print(f"❌ Path tidak ditemukan: {path}")
         return
 
     if path.is_file():
-        files = [str(path)] if path.suffix.lower() in exts else []
+        if path.suffix.lower() in video_ext:
+            files = [str(path)]
+        else:
+            log.error(f"Bukan file video: {path}")
+            print(f"❌ Bukan file video: {path}")
+            return
     else:
-        files = sorted({str(f) for f in path.iterdir()
-                        if f.suffix.lower() in exts})
+        files = []
+        for ext in video_ext:
+            files.extend([str(f) for f in path.glob(f'*{ext}')])
+            files.extend([str(f) for f in path.glob(f'*{ext.upper()}')])
+        files = sorted(files)
 
     if not files:
-        print("❌ Tidak ada file video!")
+        log.warning("Tidak ada file video ditemukan!")
+        print("❌ Tidak ada file video ditemukan!")
         return
 
-    print(f"📁 {len(files)} file(s)")
+    print(f"\n📁 Found {len(files)} file(s):")
     for f in files[:10]:
-        sz = os.path.getsize(f) / (1024 * 1024)
-        print(f"   - {os.path.basename(f)} ({sz:.1f} MB)")
+        size = os.path.getsize(f) / (1024 * 1024)
+        print(f"   - {os.path.basename(f)} ({size:.1f} MB)")
+    if len(files) > 10:
+        print(f"   ... +{len(files) - 10} more")
 
-    return await upload_multiple(files)
+    log.info(f"Upload {len(files)} files")
+    results = await upload_multiple(files)
+    return results
 
 
-# ═══════════════════════════════════════
+# ========================
 #  DEBUG
-# ═══════════════════════════════════════
+# ========================
 
 async def debug_page(url):
     scraper = VideoScraper()
     try:
         await scraper.start_browser()
+        log.info(f"Debug: {url}")
         await scraper.debug(url, screenshot_path='debug_screenshot.png')
     finally:
         await scraper.close()
 
 
-# ═══════════════════════════════════════
+# ========================
 #  CLI
-# ═══════════════════════════════════════
+# ========================
 
 def parse_args():
-    p = argparse.ArgumentParser(
-        description='Video Scraper v2.0 - Concurrent Pipeline')
+    parser = argparse.ArgumentParser(
+        description='Video Scraper - Intercept & Download HLS streams',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
 
-    g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument('--url',         help='URL halaman video')
-    g.add_argument('--direct',      help='URL M3U8 langsung')
-    g.add_argument('--batch',       help='File list URL (.txt)')
-    g.add_argument('--csv',         help='File CSV (update in-place)')
-    g.add_argument('--upload-only', help='Upload file/folder')
-    g.add_argument('--debug',       help='Debug halaman')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--url', help='URL halaman video')
+    group.add_argument('--direct', help='URL M3U8 langsung')
+    group.add_argument('--batch', help='File list URL (txt)')
+    group.add_argument('--csv', help='File CSV (update in-place)')
+    group.add_argument('--upload-only', help='Upload file/folder')
+    group.add_argument('--debug', help='Debug halaman')
 
-    p.add_argument('-o', '--output',    default=None)
-    p.add_argument('--output-dir',      default='.')
-    p.add_argument('-r', '--referer',   default=None)
-    p.add_argument('--upload',          action='store_true')
-    p.add_argument('--csv-column',      default='url')
-    p.add_argument('--max-dl', type=int, default=None,
-                   help=f'Concurrent downloads (default {config.MAX_CONCURRENT_DOWNLOADS})')
-    p.add_argument('--max-up', type=int, default=None,
-                   help=f'Concurrent uploads (default {config.MAX_CONCURRENT_UPLOADS})')
-    return p.parse_args()
+    parser.add_argument('--output', '-o', default=None, help='Output filename')
+    parser.add_argument('--output-dir', default='.', help='Output directory')
+    parser.add_argument('--referer', '-r', default=None, help='Custom referer')
+    parser.add_argument('--upload', action='store_true', help='Upload ke Streamtape')
+    parser.add_argument('--csv-column', default='url', help='Nama kolom URL di CSV')
+
+    return parser.parse_args()
 
 
 def main():
@@ -254,36 +520,45 @@ def main():
 
     print("""
 ╔══════════════════════════════════════╗
-║     🎬 VIDEO SCRAPER v2.0           ║
-║     ⚡ Concurrent Pipeline          ║
+║       🎬 VIDEO SCRAPER v2.0         ║
+║       ⚡ Concurrent Pipeline        ║
 ╚══════════════════════════════════════╝
     """)
 
     if args.direct:
-        ok = download_direct(args.direct,
-                             args.output or config.DEFAULT_OUTPUT,
-                             args.referer or config.DEFAULT_REFERER)
-        if ok and args.upload:
+        success = download_direct(
+            m3u8_url=args.direct,
+            output_file=args.output or config.DEFAULT_OUTPUT,
+            referer=args.referer or config.DEFAULT_REFERER,
+        )
+        if success and args.upload:
             loop.run_until_complete(
-                upload_to_streamtape(args.output or config.DEFAULT_OUTPUT))
+                upload_to_streamtape(args.output or config.DEFAULT_OUTPUT)
+            )
 
     elif args.url:
         loop.run_until_complete(
-            scrape_single(args.url, args.output, args.referer, args.upload))
+            scrape_single(args.url, args.output, args.referer, args.upload)
+        )
 
     elif args.batch:
         if not os.path.exists(args.batch):
-            sys.exit(f"❌ File tidak ditemukan: {args.batch}")
-        with open(args.batch) as f:
-            urls = f.read().splitlines()
+            log.error(f"File tidak ditemukan: {args.batch}")
+            print(f"❌ File tidak ditemukan: {args.batch}")
+            sys.exit(1)
+        with open(args.batch, 'r') as f:
+            urls = [l.strip() for l in f if l.strip() and not l.startswith('#')]
+        print(f"📋 {len(urls)} URL dari {args.batch}")
+        os.makedirs(args.output_dir, exist_ok=True)
         loop.run_until_complete(
-            scrape_batch(urls, args.output_dir, args.referer, args.upload,
-                         args.max_dl, args.max_up))
+            scrape_batch(urls, args.output_dir, args.referer, args.upload)
+        )
 
     elif args.csv:
         loop.run_until_complete(
             scrape_csv(args.csv, args.csv_column, args.output_dir,
-                       args.referer, args.upload, args.max_dl, args.max_up))
+                       args.referer, args.upload)
+        )
 
     elif args.upload_only:
         loop.run_until_complete(upload_only(args.upload_only))
