@@ -221,44 +221,23 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description='Video Scraper - Intercept & Download HLS streams',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Scrape & download
-  python main.py --url "https://site.com/video"
-  python main.py --url "https://site.com/video" --output my_video.mp4
-
-  # Scrape, download & upload ke Streamtape
-  python main.py --url "https://site.com/video" --upload
-
-  # Direct download M3U8
-  python main.py --direct "https://xxx/index.m3u8" --output video.mp4
-
-  # Batch scrape
-  python main.py --batch urls.txt --output-dir ./videos
-  python main.py --batch urls.txt --output-dir ./videos --upload
-
-  # Upload only (tanpa scraping)
-  python main.py --upload video.mp4
-  python main.py --upload ./videos
-
-  # Debug
-  python main.py --debug "https://site.com/video"
-        """,
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--url', help='URL halaman video untuk di-scrape')
     group.add_argument('--direct', help='URL M3U8 langsung (skip scraping)')
     group.add_argument('--batch', help='File berisi list URL (satu per baris)')
-    group.add_argument('--upload', nargs='?', const=True, help='Upload ke Streamtape (path file/folder, atau flag saja)')
+    group.add_argument('--upload-only', help='Upload file/folder ke Streamtape (tanpa scraping)')
     group.add_argument('--debug', help='Debug halaman (screenshot + info)')
 
     parser.add_argument('--output', '-o', default=None, help='Output filename')
     parser.add_argument('--output-dir', default='.', help='Output directory untuk batch')
     parser.add_argument('--referer', '-r', default=None, help='Custom referer header')
+    
+    # Flag terpisah untuk upload setelah download
+    parser.add_argument('--upload', action='store_true', help='Upload ke Streamtape setelah download')
 
     return parser.parse_args()
-
 
 def main():
     args = parse_args()
