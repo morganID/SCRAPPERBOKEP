@@ -120,5 +120,6 @@ DELETE_AFTER_UPLOAD = True
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
-    format='[%(levelname)s] %(message)s',
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
 )
