@@ -58,6 +58,16 @@ class CSVPipeline:
         self.sem_dl = asyncio.Semaphore(self.max_dl)
         self.sem_up = asyncio.Semaphore(self.max_up)
         self.csv_lock = asyncio.Lock()
+        
+        # Track active tasks for concurrent display
+        self._active_dl = 0
+        self._active_up = 0
+        self._dl_lock = asyncio.Lock()
+        self._up_lock = asyncio.Lock()
+    
+    def _get_status(self) -> str:
+        """Get concurrent status string."""
+        return f"⚡ [DL:{self._active_dl}/{self.max_dl}] [UP:{self._active_up}/{self.max_up}]"
     
     async def run(self) -> List[Dict[str, Any]]:
         """
@@ -243,8 +253,12 @@ class CSVPipeline:
         Returns:
             Updated job dictionary.
         """
+        # Download phase
         async with sem_dl:
-            logger.info(f"Downloading: {job['title'][:40]}")
+            async with self._dl_lock:
+                self._active_dl += 1
+            status = self._get_status()
+            print(f"{status} 📥 {job['title'][:30]}...")
             
             success = await asyncio.to_thread(
                 download_video,
@@ -252,29 +266,37 @@ class CSVPipeline:
                 output_file=job['output'],
                 referer=self.referer,
             )
+            
+            async with self._dl_lock:
+                self._active_dl -= 1
         
         if not success:
             job['status'] = 'DOWNLOAD_FAILED'
-            logger.warning(f"Download failed: {job['title'][:40]}")
+            print(f"❌ Download failed: {job['title'][:40]}")
             return job
         
         size = os.path.getsize(job['output']) / (1024 * 1024)
-        print(f"✅ Downloaded: {job['title'][:40]} ({size:.1f} MB)")
         job['status'] = 'DOWNLOADED'
         
         if self.upload:
             async with sem_up:
-                logger.info(f"Uploading: {job['title'][:40]}")
+                async with self._up_lock:
+                    self._active_up += 1
+                status = self._get_status()
+                print(f"{status} 📤 {job['title'][:30]}...")
+                
                 st_url = await upload_to_streamtape(job['output'])
+                
+                async with self._up_lock:
+                    self._active_up -= 1
             
             if st_url:
                 job['streamtape'] = st_url
                 job['status'] = 'OK'
-                print(f"📺 {st_url}")
-                logger.info(f"Uploaded: {st_url}")
+                print(f"✅ {job['title'][:40]} → {st_url}")
             else:
                 job['status'] = 'UPLOAD_FAILED'
-                logger.warning(f"Upload failed: {job['title'][:40]}")
+                print(f"❌ Upload failed: {job['title'][:40]}")
         
         return job
     
